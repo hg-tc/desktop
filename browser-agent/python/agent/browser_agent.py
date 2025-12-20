@@ -55,8 +55,10 @@ Guidelines:
 2. Use take_snapshot to get the page's accessibility tree with element UIDs
 3. Use the UID from snapshot to interact with elements (click, fill)
 4. If you get "No snapshot found" error, call take_snapshot first then retry
-5. Wait for page loads before interacting
-6. For simple questions or chat, respond directly without using browser tools
+5. Clicking strategy: prefer obvious interactive targets such as links, post titles, cards/card containers, or buttons. Avoid clicking blank areas, decorative icons, avatars, tags, or non-interactive text.
+6. After a click, if a login/captcha/verification modal appears, pause and tell the user to take over (do not try to bypass it).
+7. Wait for page loads before interacting
+8. For simple questions or chat, respond directly without using browser tools
 
 Be concise and efficient. Report errors clearly."""
 
@@ -172,6 +174,14 @@ class BrowserAgent:
                 # Tool execution completed
                 tool_elapsed = time.time() - tool_start_time if tool_start_time else 0
                 logger.info("⏱️ [%.2fs] Tool result (took %.2fs): %s", elapsed, tool_elapsed, str(msg.content)[:80])
+                yield {"type": "tool_end", "output": msg.content}
+                current_tool_call = None
+                tool_start_time = None
+
+            # Defensive: in some cases tool output may arrive in other message types.
+            # Ensure frontend receives tool_end so it doesn't stay in "running".
+            elif node == "tools" and hasattr(msg, "content") and msg.content:
+                logger.info("⏱️ [%.2fs] Tool output (non-ToolMessage): %s", elapsed, str(msg.content)[:80])
                 yield {"type": "tool_end", "output": msg.content}
                 current_tool_call = None
                 tool_start_time = None
