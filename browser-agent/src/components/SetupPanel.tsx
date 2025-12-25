@@ -65,10 +65,10 @@ export function SetupPanel({ onSetup, isLoading }: SetupPanelProps) {
   };
 
   return (
-    <div className="bg-[var(--bg-secondary)] rounded-xl shadow-lg p-8 max-w-md w-full mx-auto border border-[var(--bg-tertiary)]">
+    <div className="bg-[var(--bg-secondary)] rounded-2xl p-8 max-w-md w-full mx-auto border border-[var(--border)] shadow-[var(--shadow-soft)]">
       <div className="text-center mb-8">
-        <div className="w-16 h-16 bg-[var(--accent)] rounded-full flex items-center justify-center mx-auto mb-4 text-white text-2xl font-bold">
-          🤖
+        <div className="w-12 h-12 bg-[var(--bg-tertiary)] border border-[var(--border)] rounded-2xl flex items-center justify-center mx-auto mb-4 text-[var(--text-primary)] text-sm font-semibold">
+          BA
         </div>
         <h2 className="text-2xl font-bold text-[var(--text-primary)]">
           Browser Agent Setup
@@ -87,7 +87,7 @@ export function SetupPanel({ onSetup, isLoading }: SetupPanelProps) {
             type="password"
             value={config.apiKey}
             onChange={(e) => setConfig({ ...config, apiKey: e.target.value })}
-            className="w-full px-4 py-2.5 bg-[var(--bg-tertiary)] border border-[var(--bg-tertiary)] rounded-lg text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)] transition-all"
+            className="w-full px-4 py-2.5 bg-[var(--bg-primary)] border border-[var(--border)] rounded-xl text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)] focus:border-transparent transition-all"
             placeholder="sk-..."
             required
           />
@@ -102,7 +102,7 @@ export function SetupPanel({ onSetup, isLoading }: SetupPanelProps) {
               type="url"
               value={config.apiBase}
               onChange={(e) => setConfig({ ...config, apiBase: e.target.value })}
-              className="w-full px-4 py-2.5 bg-[var(--bg-tertiary)] border border-[var(--bg-tertiary)] rounded-lg text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)] transition-all"
+              className="w-full px-4 py-2.5 bg-[var(--bg-primary)] border border-[var(--border)] rounded-xl text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)] focus:border-transparent transition-all"
               placeholder="https://api.openai.com/v1"
             />
           </div>
@@ -115,7 +115,7 @@ export function SetupPanel({ onSetup, isLoading }: SetupPanelProps) {
               type="text"
               value={config.model}
               onChange={(e) => setConfig({ ...config, model: e.target.value })}
-              className="w-full px-4 py-2.5 bg-[var(--bg-tertiary)] border border-[var(--bg-tertiary)] rounded-lg text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)] transition-all"
+              className="w-full px-4 py-2.5 bg-[var(--bg-primary)] border border-[var(--border)] rounded-xl text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)] focus:border-transparent transition-all"
               placeholder="gpt-4o"
             />
           </div>
@@ -129,7 +129,7 @@ export function SetupPanel({ onSetup, isLoading }: SetupPanelProps) {
             type="text"
             value={config.browserUrl}
             onChange={(e) => setConfig({ ...config, browserUrl: e.target.value })}
-            className="w-full px-4 py-2.5 bg-[var(--bg-tertiary)] border border-[var(--bg-tertiary)] rounded-lg text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)] transition-all"
+            className="w-full px-4 py-2.5 bg-[var(--bg-primary)] border border-[var(--border)] rounded-xl text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)] focus:border-transparent transition-all"
             placeholder="http://127.0.0.1:9222"
           />
           <p className="text-xs text-[var(--text-secondary)] mt-1.5 opacity-80">
@@ -140,7 +140,7 @@ export function SetupPanel({ onSetup, isLoading }: SetupPanelProps) {
         <button
           type="submit"
           disabled={isLoading || !config.apiKey}
-          className="w-full py-3 px-4 bg-[var(--accent)] hover:bg-[var(--accent-hover)] disabled:opacity-50 disabled:cursor-not-allowed text-white font-medium rounded-lg transition-colors flex items-center justify-center gap-2 mt-2"
+          className="w-full py-3 px-4 bg-[var(--accent)] hover:bg-[var(--accent-hover)] disabled:opacity-50 disabled:cursor-not-allowed text-white font-medium rounded-xl transition-colors flex items-center justify-center gap-2 mt-2"
         >
           {isLoading ? (
             <>

@@ -10,7 +10,7 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    Tauri Desktop App                         │
+│                   Electron Desktop App                       │
 ├─────────────────────────────────────────────────────────────┤
 │  Frontend (React + TypeScript + TailwindCSS)                │
 │  └── WebSocket/HTTP ──► Python Backend (FastAPI)            │
@@ -25,7 +25,7 @@
 
 | 层级 | 技术 |
 |------|------|
-| Desktop | Tauri 2.x (Rust) |
+| Desktop | Electron |
 | Frontend | React 19 + TypeScript + TailwindCSS 4 |
 | Backend | Python 3.11+ + FastAPI + LangChain 1.0 |
 | MCP | langchain-mcp-adapters + chrome-devtools-mcp |
@@ -51,8 +51,8 @@
 # 2. 启动后端
 cd python && source .venv/bin/activate && python main.py
 
-# 3. 启动前端
-pnpm dev
+# 3. 启动 Electron (会自动启动前端 dev server)
+pnpm dev:electron
 ```
 
 ### 环境配置
@@ -72,6 +72,9 @@ CHROME_DEBUG_URL=http://127.0.0.1:9222  # 可选，连接已有 Chrome
 
 ```
 browser-agent/
+├── electron/                  # Electron 主进程/Preload
+│   ├── main.cjs               # Electron main
+│   └── preload.cjs            # Electron preload
 ├── python/                    # Python 后端
 │   ├── agent/
 │   │   ├── browser_agent.py   # LangChain Agent 核心

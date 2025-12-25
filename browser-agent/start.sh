@@ -126,6 +126,6 @@ PY
   sleep 0.2
 done
 
-echo "Starting Tauri dev..." >&2
+echo "Starting Electron dev..." >&2
 cd "$ROOT_DIR"
-pnpm tauri dev
+pnpm dev:electron

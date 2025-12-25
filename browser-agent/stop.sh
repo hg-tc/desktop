@@ -13,11 +13,13 @@ pkill -f "python main.py" 2>/dev/null || true
 echo "停止前端开发服务器..."
 pkill -f "vite" 2>/dev/null || true
 pkill -f "pnpm dev" 2>/dev/null || true
+pkill -f "pnpm dev:electron" 2>/dev/null || true
+pkill -f "concurrently" 2>/dev/null || true
 
-# 停止 Tauri 进程
-echo "停止 Tauri 进程..."
-pkill -f "tauri dev" 2>/dev/null || true
-pkill -f "cargo run" 2>/dev/null || true
+# 停止 Electron 进程
+echo "停止 Electron 进程..."
+pkill -f "electron .*electron/main.cjs" 2>/dev/null || true
+pkill -f "electron ./electron/main.cjs" 2>/dev/null || true
 
 # 停止 Chrome 调试实例 (端口 9222)
 if [[ "${STOP_CHROME:-0}" == "1" ]]; then
@@ -38,4 +40,4 @@ fi
 echo "✅ 清理完成！"
 echo ""
 echo "现在可以重新启动应用："
-echo "  pnpm tauri dev"
+echo "  pnpm dev:electron"

@@ -84,11 +84,24 @@ function App() {
 
         <main className="flex-1 flex flex-col">
           {error && (
-            <div className="bg-[var(--error)] text-white px-4 py-2 flex justify-between items-center">
-              <span>{error}</span>
-              <button onClick={clearError} className="text-white hover:opacity-80">
-                ✕
-              </button>
+            <div className="p-4">
+              <div className="bg-[var(--error)]/10 border border-[var(--error)]/25 text-[var(--text-primary)] px-4 py-3 rounded-2xl flex justify-between items-start gap-4">
+                <div className="text-sm leading-relaxed">
+                  <div className="text-[10px] uppercase tracking-wider font-semibold text-[var(--error)] mb-1">
+                    Error
+                  </div>
+                  <div className="text-[var(--text-primary)] whitespace-pre-wrap break-words">
+                    {error}
+                  </div>
+                </div>
+                <button
+                  onClick={clearError}
+                  className="text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
+                  aria-label="Dismiss error"
+                >
+                  ✕
+                </button>
+              </div>
             </div>
           )}
 

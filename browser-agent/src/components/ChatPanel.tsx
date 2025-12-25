@@ -43,13 +43,26 @@ export function ChatPanel({ messages, onSendMessage, isLoading }: ChatPanelProps
 
   return (
     <div className="flex flex-col h-full bg-[var(--bg-primary)]">
+      <div className="h-14 px-6 flex items-center justify-between border-b border-[var(--border)] bg-[var(--bg-secondary)]/70 backdrop-blur-sm">
+        <div className="flex items-center gap-3">
+          <div className="w-8 h-8 rounded-xl bg-[var(--bg-tertiary)] border border-[var(--border)]" />
+          <div className="leading-tight">
+            <div className="text-sm font-semibold text-[var(--text-primary)]">Workspace</div>
+            <div className="text-[10px] text-[var(--text-secondary)]">Describe a task and I’ll drive Chrome via MCP</div>
+          </div>
+        </div>
+
+        <div className="text-[10px] text-[var(--text-secondary)] opacity-80">
+          {isLoading ? 'Running…' : 'Idle'}
+        </div>
+      </div>
+
       <div className="flex-1 overflow-y-auto p-6 space-y-6 scrollbar-thin scrollbar-thumb-[var(--bg-tertiary)] scrollbar-track-transparent">
         {messages.length === 0 ? (
-          <div className="h-full flex flex-col items-center justify-center text-[var(--text-secondary)] opacity-50 select-none">
-            <div className="text-6xl mb-4">🕷️</div>
-            <p className="text-xl font-medium mb-2">Browser Agent Ready</p>
-            <p className="text-sm text-center max-w-sm">
-              I can navigate websites, click elements, fill forms, and extract data for you.
+          <div className="h-full flex flex-col items-center justify-center select-none">
+            <p className="text-xl font-semibold text-[var(--text-primary)] mb-2">Browser Agent</p>
+            <p className="text-sm text-center max-w-sm text-[var(--text-secondary)]">
+              Try: “Open Google and search for Electron security best practices, then summarize the top 3 points.”
             </p>
           </div>
         ) : (
@@ -67,9 +80,9 @@ export function ChatPanel({ messages, onSendMessage, isLoading }: ChatPanelProps
         <div ref={messagesEndRef} />
       </div>
 
-      <div className="p-4 bg-[var(--bg-secondary)] border-t border-[var(--bg-tertiary)]">
+      <div className="p-4 bg-[var(--bg-secondary)] border-t border-[var(--border)]">
         <form onSubmit={handleSubmit} className="relative max-w-4xl mx-auto flex gap-3 items-end">
-          <div className="relative flex-1 bg-[var(--bg-tertiary)] rounded-xl border border-transparent focus-within:border-[var(--accent)] focus-within:ring-1 focus-within:ring-[var(--accent)] transition-all">
+          <div className="relative flex-1 bg-[var(--bg-primary)] rounded-2xl border border-[var(--border)] focus-within:border-transparent focus-within:ring-2 focus-within:ring-[var(--accent)] transition-all">
             <textarea
               ref={textareaRef}
               value={input}
@@ -78,13 +91,13 @@ export function ChatPanel({ messages, onSendMessage, isLoading }: ChatPanelProps
               placeholder="Describe the browser task..."
               disabled={isLoading}
               rows={1}
-              className="w-full px-4 py-3 bg-transparent text-[var(--text-primary)] placeholder-[var(--text-secondary)] resize-none focus:outline-none max-h-[120px] rounded-xl"
+              className="w-full px-4 py-3 bg-transparent text-[var(--text-primary)] placeholder-[var(--text-secondary)] resize-none focus:outline-none max-h-[120px] rounded-2xl"
             />
           </div>
           <button
             type="submit"
             disabled={isLoading || !input.trim()}
-            className="h-[46px] px-6 bg-[var(--accent)] hover:bg-[var(--accent-hover)] disabled:opacity-50 disabled:cursor-not-allowed text-white font-medium rounded-xl transition-all shadow-lg hover:shadow-xl hover:-translate-y-0.5 active:translate-y-0 flex items-center justify-center min-w-[100px]"
+            className="h-[46px] px-6 bg-[var(--accent)] hover:bg-[var(--accent-hover)] disabled:opacity-50 disabled:cursor-not-allowed text-white font-medium rounded-2xl transition-colors flex items-center justify-center min-w-[110px]"
           >
             {isLoading ? (
               <LoadingSpinner />
