@@ -4,3 +4,15 @@ contextBridge.exposeInMainWorld('browserAgentDesktop', {
   openExternal: (url) => ipcRenderer.invoke('browserAgent:openExternal', url),
   getAppVersion: () => ipcRenderer.invoke('browserAgent:getAppVersion'),
 });
+
+contextBridge.exposeInMainWorld('browserAgent', {
+  getAppVersion: () => ipcRenderer.invoke('browserAgent:getAppVersion'),
+  openExternal: (url) => ipcRenderer.invoke('browserAgent:openExternal', url),
+  config: () => ipcRenderer.invoke('browserAgent:config'),
+  status: () => ipcRenderer.invoke('browserAgent:status'),
+  tools: () => ipcRenderer.invoke('browserAgent:tools'),
+  setup: (payload) => ipcRenderer.invoke('browserAgent:setup', payload),
+  execute: (payload) => ipcRenderer.invoke('browserAgent:execute', payload),
+  clearHistory: () => ipcRenderer.invoke('browserAgent:clearHistory'),
+  shutdown: () => ipcRenderer.invoke('browserAgent:shutdown'),
+});

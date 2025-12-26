@@ -8,6 +8,7 @@ across tool calls (required for chrome-devtools-mcp).
 import asyncio
 import logging
 import os
+import shutil
 import time
 from typing import Any, Optional
 from langchain_mcp_adapters.client import MultiServerMCPClient
@@ -114,12 +115,22 @@ class MCPClientManager:
         args = ["-y", "chrome-devtools-mcp@latest"]
         if browser_url:
             args.append(f"--browser-url={browser_url}")
+        npx_cmd = os.getenv("MCP_NPX_COMMAND") or shutil.which("npx")
+
+        if not npx_cmd:
+            raise RuntimeError(
+                "Cannot find 'npx' in PATH. Install Node.js (which provides npx), "
+                "or set MCP_NPX_COMMAND environment variable."
+            )
+
+        command = npx_cmd
+        command_args = args
 
         self._client = MultiServerMCPClient({
             "chrome": {
                 "transport": "stdio",
-                "command": "/opt/homebrew/bin/node",
-                "args": ["/opt/homebrew/bin/npx"] + args,
+                "command": command,
+                "args": command_args,
             }
         })
 

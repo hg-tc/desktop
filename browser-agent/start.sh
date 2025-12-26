@@ -18,6 +18,10 @@ require_cmd() {
 require_cmd python3
 require_cmd pnpm
 
+if [[ -z "${BROWSER_AGENT_REMOTE_URL:-}" && -z "${CONSULT_WEB_URL:-}" ]]; then
+  export CONSULT_WEB_URL="https://ai.ibraintech.top"
+fi
+
 mkdir -p "$CHROME_PROFILE_DIR"
 
 CHROME_DEBUG_URL="$(grep -E '^CHROME_DEBUG_URL=' "$PY_DIR/.env" | tail -n1 | cut -d= -f2- || true)"
@@ -128,4 +132,8 @@ done
 
 echo "Starting Electron dev..." >&2
 cd "$ROOT_DIR"
-pnpm dev:electron
+if [[ -n "${BROWSER_AGENT_REMOTE_URL:-}" || -n "${CONSULT_WEB_URL:-}" ]]; then
+  pnpm dev:electron:remote
+else
+  pnpm dev:electron
+fi
