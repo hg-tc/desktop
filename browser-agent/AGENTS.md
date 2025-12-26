@@ -146,6 +146,26 @@ BROWSER_AGENT_WORKER_URL=http://127.0.0.1:8765
 4. Worker 执行 LangChain Agent -> MCP -> Chrome，返回结果
 5. Electron 把结果回传给网页
 
+### 远程 UI 授权（P2 Desktop Grant）
+
+远程 UI（Consult）在调用本机能力前，会先完成一次“服务端签发短期授权 → 桌面端校验并缓存授权”的流程：
+
+1. Consult 调用后端：`POST /api/apps/desktop-grant` 获取短期 grant（JWT）
+2. Consult 调用桌面端：`window.browserAgent.authorize({ access_token, grant })`
+3. Electron 主进程调用后端：`POST /api/apps/desktop-grant/verify` 校验 grant
+4. 校验通过后，Electron 在本地缓存本次授权状态，后续 `window.browserAgent.*` 调用才会放行
+
+后端 `verify` 会返回可观测性 headers：
+
+- **`X-Grant-Issuer`**：签发/校验所在实例标识（hostname:pid）
+- **`X-Secret-Fp`**：服务端 `SECRET_KEY` 指纹（用于排查不同实例密钥不一致）
+- **`X-Server-Now`**：服务端当前 Unix 时间戳（用于排查时钟/时区问题）
+
+常见失败原因：
+
+- **`reason=expired`**：grant 过期。若 “刚签发立刻 expired”，通常是服务端签发时的 `iat/exp` 时间戳计算错误（时区/naive datetime）。服务端签发应使用 Unix 时间戳（如 `time.time()`）生成 `iat/exp`。
+- **`reason=decode_error`**：验签失败（通常是密钥不一致/token 被污染）。
+
 ### IPC Bridge（window.browserAgent）
 
 桌面端会注入以下 API（远程 UI 可直接使用）：
@@ -201,6 +221,44 @@ consult/frontend/               # 远程 Web UI（Next.js）
 | GET | `/api/tools` | 获取工具列表 |
 | POST | `/api/clear-history` | 清除对话历史 |
 | POST | `/api/shutdown` | 关闭 Agent |
+
+## 常见问题排查
+
+### 点击执行没效果 / 本机 Worker 返回 400
+
+如果本机 Worker 日志出现：
+
+- `GET /api/tools 400 Bad Request`
+- `POST /api/execute 400 Bad Request`
+
+通常是因为 **Agent 尚未初始化**：Worker 侧要求先调用 `POST /api/setup`，否则 `/api/tools`、`/api/execute` 会返回：`Agent not initialized. Call /setup first.`
+
+建议的最短验证顺序：
+
+1. `window.browserAgent.status()` 确认 `initialized`
+2. `window.browserAgent.setup({ ... })` 初始化
+3. `window.browserAgent.tools()` / `window.browserAgent.execute({ prompt })`
+
+### Console 最小自检脚本（远程 UI 模式）
+
+在 Electron 窗口 DevTools Console 执行：
+
+```js
+await window.browserAgent.status();
+await window.browserAgent.setup({});
+await window.browserAgent.execute({ prompt: "打开 https://example.com 并告诉我标题" });
+```
+
+如果 `setup/execute` 返回对象包含 `error` 字段，优先根据该错误排查：
+
+- OpenAI API Key/模型配置是否存在（`python/.env`）
+- Chrome 调试端口是否可用（默认 `http://127.0.0.1:9222`）
+
+### Network 面板看不到 verify 请求
+
+Electron 主进程发起的网络请求不会出现在渲染进程 DevTools 的 Network 面板。
+
+如需抓包查看 `/api/apps/desktop-grant/verify` 返回的 `reason`/headers，可在 Console 里用 `fetch(...)` 从页面发起请求，或在主进程打印日志。
 
 ## MCP 工具
 
