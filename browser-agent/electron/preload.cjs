@@ -8,6 +8,7 @@ contextBridge.exposeInMainWorld('browserAgentDesktop', {
 contextBridge.exposeInMainWorld('browserAgent', {
   getAppVersion: () => ipcRenderer.invoke('browserAgent:getAppVersion'),
   openExternal: (url) => ipcRenderer.invoke('browserAgent:openExternal', url),
+  authorize: (payload) => ipcRenderer.invoke('browserAgent:authorize', payload),
   config: () => ipcRenderer.invoke('browserAgent:config'),
   status: () => ipcRenderer.invoke('browserAgent:status'),
   tools: () => ipcRenderer.invoke('browserAgent:tools'),
