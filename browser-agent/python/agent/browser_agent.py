@@ -14,6 +14,7 @@ import os
 import re
 import time
 import uuid
+from difflib import SequenceMatcher
 from hashlib import sha256
 from typing import Any, AsyncGenerator, Optional
 
@@ -55,21 +56,53 @@ class BrowserAgent:
         self._browser_url: Optional[str] = None
         self._last_snapshot_text: Optional[str] = None
         self._last_snapshot_hash: Optional[str] = None
+        self._last_snapshot_filtered_text: Optional[str] = None
+        self._last_snapshot_filtered_hash: Optional[str] = None
 
     def _postprocess_snapshot_text(
         self,
         text: str,
         *,
-        compact: bool,
-        keywords: list[str],
-        context_lines: int,
+        level: int,
         max_chars: int,
-        delta: bool,
+        delta_mode: str,
     ) -> str:
         raw = text or ""
         raw_hash = sha256(raw.encode("utf-8", errors="ignore")).hexdigest()
 
         lines = raw.splitlines()
+
+        def _section_marker_kind(line: str) -> str:
+            l = (line or "").strip().lower()
+            if not l:
+                return ""
+
+            # Strong markers (title/structure)
+            if "heading" in l:
+                return "heading"
+            if "dialog" in l or "modal" in l:
+                return "dialog"
+
+            # Medium markers (layout)
+            if "header" in l or "banner" in l:
+                return "header"
+            if "navigation" in l or "nav" in l:
+                return "navigation"
+            if "main" in l:
+                return "main"
+            if "footer" in l or "contentinfo" in l:
+                return "footer"
+            if "tablist" in l:
+                return "tablist"
+            if "toolbar" in l:
+                return "toolbar"
+            return ""
+
+        def _section_title(line: str) -> str:
+            t = (line or "").strip()
+            if len(t) > 160:
+                t = t[:160]
+            return t
 
         def _is_interactive_line(line: str) -> bool:
             l = line.lower()
@@ -91,25 +124,79 @@ class BrowserAgent:
                 )
             )
 
-        kept_indices: set[int] = set()
-        if compact:
-            for i, line in enumerate(lines):
-                if _is_interactive_line(line):
-                    start = max(0, i - context_lines)
-                    end = min(len(lines), i + context_lines + 1)
-                    kept_indices.update(range(start, end))
+        section_starts: list[int] = [0]
+        section_titles: dict[int, str] = {0: ""}
+        section_kinds: dict[int, str] = {0: ""}
+        last_strong_heading_i: Optional[int] = None
+        last_marker_i: Optional[int] = None
 
-        if keywords:
-            try:
-                pattern = re.compile("|".join(re.escape(k) for k in keywords), re.IGNORECASE)
-            except re.error:
-                pattern = None
-            if pattern:
-                for i, line in enumerate(lines):
-                    if pattern.search(line):
-                        start = max(0, i - context_lines)
-                        end = min(len(lines), i + context_lines + 1)
-                        kept_indices.update(range(start, end))
+        for i, line in enumerate(lines):
+            if i == 0:
+                continue
+
+            kind = _section_marker_kind(line)
+            if not kind:
+                continue
+
+            # Always keep headings/dialogs as anchors.
+            # For weaker layout markers (nav/main/footer...), avoid creating too many
+            # sections when headings are already dense.
+            if kind not in ("heading", "dialog"):
+                if last_strong_heading_i is not None and (i - last_strong_heading_i) <= 20:
+                    continue
+                if last_marker_i is not None and (i - last_marker_i) <= 6:
+                    continue
+
+            section_starts.append(i)
+            section_titles[i] = _section_title(line)
+            section_kinds[i] = kind
+            last_marker_i = i
+            if kind == "heading":
+                last_strong_heading_i = i
+
+        section_starts = sorted(set(section_starts))
+        sections: list[tuple[int, int, str, str]] = []
+        for idx, start in enumerate(section_starts):
+            end = section_starts[idx + 1] if idx + 1 < len(section_starts) else len(lines)
+            title = section_titles.get(start, "")
+            kind = section_kinds.get(start, "")
+            sections.append((start, end, title, kind))
+
+        interactive_indices: set[int] = set()
+        interactive_sections: set[int] = set()
+        dialog_sections: set[int] = set()
+        for si, (start, end, _title, kind) in enumerate(sections):
+            if kind == "dialog":
+                dialog_sections.add(si)
+            has_interactive = False
+            for i in range(start, end):
+                if _is_interactive_line(lines[i]):
+                    interactive_indices.add(i)
+                    has_interactive = True
+            if has_interactive:
+                interactive_sections.add(si)
+
+        kept_indices: set[int] = set()
+        if level <= 0:
+            context_lines = 1
+            for i in sorted(interactive_indices):
+                start = max(0, i - context_lines)
+                end = min(len(lines), i + context_lines + 1)
+                kept_indices.update(range(start, end))
+            # Add section anchors (titles) for navigation and dialog context.
+            for si, (start, end, _title, kind) in enumerate(sections):
+                if si in interactive_sections:
+                    kept_indices.add(start)
+                    if start - 1 >= 0:
+                        kept_indices.add(start - 1)
+                if si in dialog_sections:
+                    kept_indices.update(range(start, end))
+        elif level == 1:
+            for si, (start, end, _title, _kind) in enumerate(sections):
+                if si in interactive_sections or si in dialog_sections:
+                    kept_indices.update(range(start, end))
+        else:
+            kept_indices.update(range(0, len(lines)))
 
         if kept_indices:
             filtered_lines = [lines[i] for i in sorted(kept_indices)]
@@ -122,39 +209,57 @@ class BrowserAgent:
             filtered = filtered[:max_chars]
             truncated = True
 
-        if delta:
-            prev_hash = self._last_snapshot_hash
-            prev_text = self._last_snapshot_text or ""
-            if prev_hash == raw_hash:
+        prev_filtered_hash = self._last_snapshot_filtered_hash
+        prev_filtered_text = self._last_snapshot_filtered_text or ""
+        filtered_hash = sha256(filtered.encode("utf-8", errors="ignore")).hexdigest()
+
+        def _build_diff(prev_text: str, now_text: str) -> str:
+            prev_lines = prev_text.splitlines()
+            now_lines = now_text.splitlines()
+            prev_set = set(prev_lines)
+            now_set = set(now_lines)
+
+            added = [l for l in now_lines if l not in prev_set]
+            removed = [l for l in prev_lines if l not in now_set]
+
+            out_parts = ["[snapshot:delta] changed"]
+            if added:
+                out_parts.append("[added]")
+                out_parts.extend(added[:200])
+            if removed:
+                out_parts.append("[removed]")
+                out_parts.extend(removed[:200])
+            return "\n".join(out_parts)
+
+        out: str
+        if delta_mode == "off":
+            out = filtered
+        else:
+            if prev_filtered_hash is not None and prev_filtered_hash == filtered_hash:
                 out = "[snapshot:delta] no change"
+            elif prev_filtered_hash is None:
+                out = filtered
+            elif delta_mode == "on":
+                out = _build_diff(prev_filtered_text, filtered)
             else:
-                prev_set = set(prev_text.splitlines())
-                now_set = set(filtered.splitlines())
-                added = [l for l in filtered.splitlines() if l not in prev_set]
-                removed = [l for l in prev_text.splitlines() if l not in now_set]
-
-                out_parts = ["[snapshot:delta] changed"]
-                if added:
-                    out_parts.append("[added]")
-                    out_parts.extend(added[:200])
-                if removed:
-                    out_parts.append("[removed]")
-                    out_parts.extend(removed[:200])
-                out = "\n".join(out_parts)
-
-            self._last_snapshot_text = raw
-            self._last_snapshot_hash = raw_hash
-
-            if truncated:
-                out += "\n[snapshot:truncated] true"
-            return out
+                ratio = SequenceMatcher(None, prev_filtered_text, filtered).ratio() if prev_filtered_text or filtered else 1.0
+                prev_lines = prev_filtered_text.splitlines()
+                now_lines = filtered.splitlines()
+                prev_set = set(prev_lines)
+                now_set = set(now_lines)
+                changed_lines = len([l for l in now_lines if l not in prev_set]) + len([l for l in prev_lines if l not in now_set])
+                total_lines = max(1, len(prev_lines) + len(now_lines))
+                small_change = (changed_lines <= 60 and (changed_lines / total_lines) <= 0.12 and ratio >= 0.85)
+                out = _build_diff(prev_filtered_text, filtered) if small_change else filtered
 
         self._last_snapshot_text = raw
         self._last_snapshot_hash = raw_hash
+        self._last_snapshot_filtered_text = filtered
+        self._last_snapshot_filtered_hash = filtered_hash
 
         if truncated:
-            filtered += "\n[snapshot:truncated] true"
-        return filtered
+            out += "\n[snapshot:truncated] true"
+        return out
 
     async def setup(self, browser_url: Optional[str] = None) -> None:
         """Initialize MCP connection (stateful session)."""
@@ -186,32 +291,39 @@ class BrowserAgent:
             raise ValueError("Missing tool_name")
         safe_args = args if isinstance(args, dict) else {}
 
+        wrapper_level_raw = safe_args.pop("_snapshot_level", None)
         wrapper_compact = bool(safe_args.pop("_compact", True))
-        wrapper_delta = bool(safe_args.pop("_delta", False))
-        wrapper_max_chars_raw = safe_args.pop("_max_chars", 12000)
-        wrapper_context_lines_raw = safe_args.pop("_context_lines", 2)
-        wrapper_keywords_raw = safe_args.pop("_keywords", [])
+        wrapper_delta_raw = safe_args.pop("_delta", None)
+        wrapper_max_chars_raw = safe_args.pop("_max_chars", None)
+        _ = safe_args.pop("_context_lines", None)
+        _ = safe_args.pop("_keywords", None)
 
+        if wrapper_level_raw is None:
+            wrapper_level_raw = 1 if wrapper_compact else 2
+        try:
+            wrapper_level = int(wrapper_level_raw)
+        except Exception:
+            wrapper_level = 1
+        if wrapper_level < 0:
+            wrapper_level = 0
+        if wrapper_level > 2:
+            wrapper_level = 2
+
+        if wrapper_max_chars_raw is None:
+            wrapper_max_chars_raw = 6000 if wrapper_level <= 0 else (12000 if wrapper_level == 1 else 20000)
         try:
             wrapper_max_chars = int(wrapper_max_chars_raw)
         except Exception:
             wrapper_max_chars = 12000
-        try:
-            wrapper_context_lines = int(wrapper_context_lines_raw)
-        except Exception:
-            wrapper_context_lines = 2
-        if wrapper_context_lines < 0:
-            wrapper_context_lines = 0
-        if wrapper_context_lines > 10:
-            wrapper_context_lines = 10
+        if wrapper_max_chars < 2000:
+            wrapper_max_chars = 2000
+        if wrapper_max_chars > 80000:
+            wrapper_max_chars = 80000
 
-        keywords: list[str] = []
-        if isinstance(wrapper_keywords_raw, list):
-            for k in wrapper_keywords_raw:
-                if isinstance(k, str) and k.strip():
-                    keywords.append(k.strip())
-        elif isinstance(wrapper_keywords_raw, str) and wrapper_keywords_raw.strip():
-            keywords = [wrapper_keywords_raw.strip()]
+        if wrapper_delta_raw is None:
+            delta_mode = "auto"
+        else:
+            delta_mode = "auto" if bool(wrapper_delta_raw) else "off"
 
         tool = None
         for t in self.mcp_manager.tools:
@@ -226,11 +338,9 @@ class BrowserAgent:
         if tool_name == "take_snapshot" and isinstance(result, str):
             return self._postprocess_snapshot_text(
                 result,
-                compact=wrapper_compact,
-                keywords=keywords,
-                context_lines=wrapper_context_lines,
                 max_chars=wrapper_max_chars,
-                delta=wrapper_delta,
+                level=wrapper_level,
+                delta_mode=delta_mode,
             )
 
         return result
