@@ -7,6 +7,8 @@ import os
 from pathlib import Path
 from typing import Optional
 
+import logging
+
 from dotenv import load_dotenv
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException, Body
 from pydantic import BaseModel
@@ -17,6 +19,8 @@ from agent import BrowserAgent
 
 
 router = APIRouter()
+
+logger = logging.getLogger(__name__)
 
 agent_instance: Optional[BrowserAgent] = None
 
@@ -35,6 +39,11 @@ class TaskResponse(BaseModel):
     success: bool
     output: str
     error: Optional[str] = None
+
+
+class CallToolRequest(BaseModel):
+    tool: str
+    args: dict = {}
 
 
 class SetupRequest(BaseModel):
@@ -344,20 +353,20 @@ async def execute_task(request: TaskRequest) -> TaskResponse:
     """
     Execute a browser automation task.
     """
+    raise HTTPException(
+        status_code=410,
+        detail="Desktop LLM execution is disabled. Use /call-tool to run atomic MCP tools.",
+    )
+
+
+@router.post("/call-tool")
+async def call_tool(request: CallToolRequest) -> dict:
     agent = await get_agent()
-    
     try:
-        result = await agent.execute(request.prompt)
-        return TaskResponse(
-            success=result["success"],
-            output=result["output"],
-        )
+        output = await agent.call_tool(request.tool, request.args)
+        return {"success": True, "output": output}
     except Exception as e:
-        return TaskResponse(
-            success=False,
-            output="",
-            error=str(e),
-        )
+        return {"success": False, "output": "", "error": str(e)}
 
 
 @router.post("/apps/{app_id}/execute")
@@ -366,11 +375,10 @@ async def execute_app_task(app_id: str, payload: dict = Body(default_factory=dic
     safe = payload if isinstance(payload, dict) else {}
 
     if normalized == DEFAULT_APP_ID:
-        prompt = safe.get("prompt")
-        if not isinstance(prompt, str) or not prompt.strip():
-            raise HTTPException(status_code=400, detail="Missing 'prompt'")
-        result = await execute_task(TaskRequest(prompt=prompt))
-        return result.model_dump()
+        raise HTTPException(
+            status_code=410,
+            detail="Desktop LLM execution is disabled. Use /apps/{app_id}/call-tool to run atomic MCP tools.",
+        )
 
     op = safe.get("op")
     params = safe.get("params")
@@ -417,6 +425,31 @@ async def execute_app_task(app_id: str, payload: dict = Body(default_factory=dic
             "output": "",
             "error": f"Worker exception: {str(e)}",
         }
+
+
+@router.post("/apps/{app_id}/call-tool")
+async def call_app_tool(app_id: str, payload: dict = Body(default_factory=dict)) -> dict:
+    normalized = _ensure_supported_app_id(app_id)
+    safe = payload if isinstance(payload, dict) else {}
+
+    if normalized == DEFAULT_APP_ID:
+        tool_name = safe.get("tool")
+        args = safe.get("args")
+        if not isinstance(tool_name, str) or not tool_name.strip():
+            raise HTTPException(status_code=400, detail="Missing 'tool'")
+        if args is None:
+            args = {}
+        if not isinstance(args, dict):
+            raise HTTPException(status_code=400, detail="'args' must be an object")
+
+        agent = await get_agent()
+        try:
+            output = await agent.call_tool(tool_name, args)
+            return {"success": True, "output": output}
+        except Exception as e:
+            return {"success": False, "output": "", "error": str(e)}
+
+    raise HTTPException(status_code=400, detail="Unsupported app_id")
 
 
 @router.post("/clear-history")

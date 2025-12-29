@@ -313,26 +313,37 @@ async function workerRequest(method, pathname, body) {
   }
 
   const res = await fetch(url.toString(), init);
-  const text = await res.text();
-  let payload;
-  try {
-    payload = text ? JSON.parse(text) : null;
-  } catch {
-    payload = { raw: text };
-  }
+  const contentType = (res.headers.get('content-type') || '').toLowerCase();
+  const payload = contentType.includes('application/json') ? await res.json() : await res.text();
 
   if (!res.ok) {
-    const err = new Error(`Worker request failed (${res.status} ${res.statusText})`);
+    let detail = '';
+    try {
+      if (payload && typeof payload === 'object') {
+        detail = JSON.stringify(payload);
+      } else if (typeof payload === 'string') {
+        detail = payload;
+      }
+    } catch (_) {
+      detail = '';
+    }
+
+    const errMsg = detail
+      ? `Worker request failed (${res.status} ${res.statusText}): ${detail}`
+      : `Worker request failed (${res.status} ${res.statusText})`;
+
+    const err = new Error(errMsg);
     err.payload = payload;
     throw err;
   }
+
   return payload;
 }
 
 function normalizeDesktopAction(action) {
   const a = typeof action === 'string' ? action.trim() : '';
   if (!a) return null;
-  const allowed = new Set(['status', 'config', 'tools', 'setup', 'execute', 'clearHistory', 'shutdown']);
+  const allowed = new Set(['status', 'config', 'tools', 'setup', 'execute', 'callTool', 'clearHistory', 'shutdown']);
   if (!allowed.has(a)) return null;
   return a;
 }
@@ -350,6 +361,8 @@ function mapDesktopActionToRequest(appId, action, payload) {
       return { method: 'POST', path: `${prefix}/setup`, body: payload || {} };
     case 'execute':
       return { method: 'POST', path: `${prefix}/execute`, body: payload || {} };
+    case 'callTool':
+      return { method: 'POST', path: `${prefix}/call-tool`, body: payload || {} };
     case 'clearHistory':
       return { method: 'POST', path: `${prefix}/clear-history`, body: {} };
     case 'shutdown':
