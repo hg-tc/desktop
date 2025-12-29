@@ -18,12 +18,13 @@ def main():
     """Run the server."""
     host = os.getenv("SERVER_HOST", "127.0.0.1")
     port = int(os.getenv("SERVER_PORT", "8765"))
+    reload = os.getenv("UVICORN_RELOAD", "1") == "1"
     
     uvicorn.run(
         "api.server:app",
         host=host,
         port=port,
-        reload=True,
+        reload=reload,
         log_level="info",
     )
 

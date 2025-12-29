@@ -11,6 +11,18 @@ node_modules
 dist
 dist-ssr
 release
+resources/python-runtime/
+resources/python-site-packages/
+resources/xiaohongshu-mcp/
+*.tgz
+*.zip
+*.dmg
+*.AppImage
+*.exe
+*.msi
+*.blockmap
+builder-effective-config.yaml
+*.map
 *.local
 
 # Editor directories and files
@@ -26,8 +38,21 @@ release
 
 # Python
 python/.env
+python/.env.*
 python/__pycache__/
 python/**/__pycache__/
 *.pyc
 .venv/
 venv/
+
+# Python virtualenvs under python/
+python/.venv/
+python/venv/
+
+# Electron tooling
+.electron/
+.cache/
+cache/
+
+# macOS
+*.DS_Store

@@ -17,3 +17,11 @@ contextBridge.exposeInMainWorld('browserAgent', {
   clearHistory: () => ipcRenderer.invoke('browserAgent:clearHistory'),
   shutdown: () => ipcRenderer.invoke('browserAgent:shutdown'),
 });
+
+contextBridge.exposeInMainWorld('desktopApps', {
+  listApps: () => ipcRenderer.invoke('desktopApps:listApps'),
+  authorize: (payload) => ipcRenderer.invoke('browserAgent:authorize', payload),
+  call: (payload) => ipcRenderer.invoke('desktopApps:call', payload),
+  getAppVersion: () => ipcRenderer.invoke('browserAgent:getAppVersion'),
+  openExternal: (url) => ipcRenderer.invoke('browserAgent:openExternal', url),
+});

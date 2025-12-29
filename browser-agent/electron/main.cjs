@@ -1,13 +1,22 @@
 const { app, BrowserWindow, shell, ipcMain } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const net = require('net');
+const { spawn } = require('child_process');
 const { URL } = require('url');
 
 const isDev = !app.isPackaged;
 
+const DEFAULT_REMOTE_APP_URL = 'https://ai.ibraintech.top';
+
+const DEFAULT_APP_ID = 'desktop-browser-agent';
+
 let activeAuthorization = null;
 let consentStore = null;
 let consentStorePath = null;
+
+let pythonWorkerProcess = null;
+let xhsMcpProcess = null;
 
 function resolveDevServerUrl() {
   const envUrl = process.env.VITE_DEV_SERVER_URL;
@@ -16,12 +25,175 @@ function resolveDevServerUrl() {
 }
 
 function resolveRemoteAppUrl() {
+  if (process.env.BROWSER_AGENT_FORCE_LOCAL_UI === '1') return null;
   const raw = process.env.BROWSER_AGENT_REMOTE_URL || process.env.CONSULT_WEB_URL;
-  if (!raw || !raw.trim()) return null;
+  if (!raw || !raw.trim()) {
+    if (!isDev) return DEFAULT_REMOTE_APP_URL;
+    return null;
+  }
   try {
     return new URL(raw.trim()).toString();
   } catch {
     return null;
+  }
+}
+
+function resolveWorkerScriptPath() {
+  if (isDev) {
+    return path.join(__dirname, '../python/main.py');
+  }
+  return path.join(process.resourcesPath, 'python', 'main.py');
+}
+
+function resolveEmbeddedPythonExecutable() {
+  const candidates = [];
+  if (process.platform === 'win32') {
+    candidates.push(path.join(process.resourcesPath, 'python-runtime', 'python.exe'));
+  } else {
+    candidates.push(path.join(process.resourcesPath, 'python-runtime', 'bin', 'python3'));
+    candidates.push(path.join(process.resourcesPath, 'python-runtime', 'bin', 'python'));
+  }
+  for (const p of candidates) {
+    try {
+      if (fs.existsSync(p)) return p;
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+function resolveSystemPythonExecutable() {
+  if (process.platform === 'win32') return 'python';
+  return 'python3';
+}
+
+function resolveXhsMcpExecutablePath() {
+  const exeName = process.platform === 'win32' ? 'xiaohongshu-mcp.exe' : 'xiaohongshu-mcp';
+  if (!isDev) {
+    return path.join(process.resourcesPath, 'xiaohongshu-mcp', exeName);
+  }
+  return path.join(path.resolve(__dirname, '../../xiaohongshu-mcp'), exeName);
+}
+
+function checkTcpPort(host, port, timeoutMs = 250) {
+  return new Promise((resolve) => {
+    const socket = new net.Socket();
+    let done = false;
+
+    const finish = (ok) => {
+      if (done) return;
+      done = true;
+      try {
+        socket.destroy();
+      } catch {
+        return;
+      }
+      resolve(ok);
+    };
+
+    socket.setTimeout(timeoutMs);
+    socket.once('connect', () => finish(true));
+    socket.once('timeout', () => finish(false));
+    socket.once('error', () => finish(false));
+    socket.connect(port, host);
+  });
+}
+
+async function waitForPort(host, port, timeoutMs) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const ok = await checkTcpPort(host, port, 250);
+    if (ok) return true;
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  return false;
+}
+
+async function ensurePythonWorker() {
+  const u = new URL(getWorkerBaseUrl());
+  const host = u.hostname || '127.0.0.1';
+  const port = Number(u.port || 8765);
+  if (Number.isFinite(port) && (await checkTcpPort(host, port, 250))) return;
+
+  const scriptPath = resolveWorkerScriptPath();
+  const pythonExec = resolveEmbeddedPythonExecutable() || resolveSystemPythonExecutable();
+
+  const pythonProjectDir = isDev
+    ? path.join(__dirname, '../python')
+    : path.join(process.resourcesPath, 'python');
+  const bundledSitePackagesDir = path.join(process.resourcesPath, 'python-site-packages');
+  const existingPythonPath = typeof process.env.PYTHONPATH === 'string' ? process.env.PYTHONPATH : '';
+  const pythonPathParts = [];
+  if (!isDev) {
+    pythonPathParts.push(bundledSitePackagesDir);
+  }
+  pythonPathParts.push(pythonProjectDir);
+  if (existingPythonPath) pythonPathParts.push(existingPythonPath);
+  const pythonPath = pythonPathParts.filter(Boolean).join(path.delimiter);
+
+  const childEnv = {
+    ...process.env,
+    SERVER_HOST: host,
+    SERVER_PORT: String(port),
+    UVICORN_RELOAD: '0',
+    XIAOHONGSHU_MCP_BASE_URL: 'http://127.0.0.1:18060',
+    PYTHONPATH: pythonPath,
+    PYTHONUTF8: '1',
+    PYTHONIOENCODING: 'utf-8',
+  };
+
+  pythonWorkerProcess = spawn(pythonExec, [scriptPath], {
+    env: childEnv,
+    stdio: 'inherit',
+    windowsHide: true,
+  });
+
+  await waitForPort(host, port, 15000);
+}
+
+async function ensureXhsMcp() {
+  const host = '127.0.0.1';
+  const port = 18060;
+  if (await checkTcpPort(host, port, 250)) return;
+
+  // Login is much more reliable in headed mode. Default to headed unless explicitly disabled.
+  // Set XHS_MCP_HEADLESS=1 to force headless mode.
+  const headless = process.env.XHS_MCP_HEADLESS === '1' || process.env.XIAOHONGSHU_MCP_HEADLESS === '1';
+  // IMPORTANT: Go's flag.BoolVar treats "--headless" as true and does not consume the next arg.
+  // Use "--headless=false" form to reliably set it.
+  const mcpArgs = ['--port', ':18060', `--headless=${headless ? 'true' : 'false'}`];
+
+  if (isDev) {
+    const xhsDir = path.resolve(__dirname, '../../xiaohongshu-mcp');
+    xhsMcpProcess = spawn('go', ['run', '.', ...mcpArgs], {
+      cwd: xhsDir,
+      env: { ...process.env },
+      stdio: 'inherit',
+      windowsHide: true,
+    });
+  } else {
+    const exePath = resolveXhsMcpExecutablePath();
+    xhsMcpProcess = spawn(exePath, mcpArgs, {
+      env: { ...process.env },
+      stdio: 'inherit',
+      windowsHide: true,
+    });
+  }
+
+  await waitForPort(host, port, 20000);
+}
+
+function safeKillProcess(p) {
+  if (!p) return;
+  try {
+    if (process.platform === 'win32') {
+      spawn('taskkill', ['/pid', String(p.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
+      return;
+    }
+    p.kill('SIGTERM');
+  } catch {
+    return;
   }
 }
 
@@ -97,7 +269,7 @@ function consentKeyFromPayload(payload) {
   return `${userId}:${appId}:${capability}`;
 }
 
-function checkAuthorization(action) {
+function checkAuthorization(appId, capability, action) {
   if (!shouldEnforceAuthorization()) return { ok: true };
   if (!activeAuthorization || !activeAuthorization.payload) {
     return { ok: false, error: 'Not authorized' };
@@ -109,10 +281,10 @@ function checkAuthorization(action) {
   if (payload.type !== 'desktop_grant') {
     return { ok: false, error: 'Invalid authorization type' };
   }
-  if (payload.app_id !== 'desktop-browser-agent') {
+  if (payload.app_id !== appId) {
     return { ok: false, error: 'App not authorized' };
   }
-  if (payload.capability !== 'browser_automation') {
+  if (payload.capability !== capability) {
     return { ok: false, error: 'Capability not authorized' };
   }
   if (!Array.isArray(payload.actions) || !payload.actions.includes(action)) {
@@ -155,6 +327,36 @@ async function workerRequest(method, pathname, body) {
     throw err;
   }
   return payload;
+}
+
+function normalizeDesktopAction(action) {
+  const a = typeof action === 'string' ? action.trim() : '';
+  if (!a) return null;
+  const allowed = new Set(['status', 'config', 'tools', 'setup', 'execute', 'clearHistory', 'shutdown']);
+  if (!allowed.has(a)) return null;
+  return a;
+}
+
+function mapDesktopActionToRequest(appId, action, payload) {
+  const prefix = `/api/apps/${encodeURIComponent(appId)}`;
+  switch (action) {
+    case 'status':
+      return { method: 'GET', path: `${prefix}/status` };
+    case 'config':
+      return { method: 'GET', path: `${prefix}/config` };
+    case 'tools':
+      return { method: 'GET', path: `${prefix}/tools` };
+    case 'setup':
+      return { method: 'POST', path: `${prefix}/setup`, body: payload || {} };
+    case 'execute':
+      return { method: 'POST', path: `${prefix}/execute`, body: payload || {} };
+    case 'clearHistory':
+      return { method: 'POST', path: `${prefix}/clear-history`, body: {} };
+    case 'shutdown':
+      return { method: 'POST', path: `${prefix}/shutdown`, body: {} };
+    default:
+      return null;
+  }
 }
 
 function createMainWindow() {
@@ -208,6 +410,9 @@ function createMainWindow() {
 
 app.whenReady().then(() => {
   consentStorePath = path.join(app.getPath('userData'), 'desktop-consents.json');
+
+  ensureXhsMcp().catch(() => null);
+  ensurePythonWorker().catch(() => null);
 
   ipcMain.handle('browserAgent:openExternal', async (_event, url) => {
     if (typeof url !== 'string' || url.trim() === '') return false;
@@ -328,7 +533,7 @@ app.whenReady().then(() => {
   });
 
   ipcMain.handle('browserAgent:config', async () => {
-    const auth = checkAuthorization('config');
+    const auth = checkAuthorization(DEFAULT_APP_ID, 'browser_automation', 'config');
     if (!auth.ok) return { error: auth.error };
     try {
       const raw = await workerRequest('GET', '/api/config');
@@ -344,7 +549,7 @@ app.whenReady().then(() => {
   });
 
   ipcMain.handle('browserAgent:status', async () => {
-    const auth = checkAuthorization('status');
+    const auth = checkAuthorization(DEFAULT_APP_ID, 'browser_automation', 'status');
     if (!auth.ok) return { initialized: false, connected: false, error: auth.error };
     try {
       return await workerRequest('GET', '/api/status');
@@ -354,7 +559,7 @@ app.whenReady().then(() => {
   });
 
   ipcMain.handle('browserAgent:tools', async () => {
-    const auth = checkAuthorization('tools');
+    const auth = checkAuthorization(DEFAULT_APP_ID, 'browser_automation', 'tools');
     if (!auth.ok) return { tools: [], error: auth.error };
     try {
       return await workerRequest('GET', '/api/tools');
@@ -364,7 +569,7 @@ app.whenReady().then(() => {
   });
 
   ipcMain.handle('browserAgent:setup', async (_event, payload) => {
-    const auth = checkAuthorization('setup');
+    const auth = checkAuthorization(DEFAULT_APP_ID, 'browser_automation', 'setup');
     if (!auth.ok) return { success: false, error: auth.error };
     try {
       return await workerRequest('POST', '/api/setup', payload || {});
@@ -374,7 +579,7 @@ app.whenReady().then(() => {
   });
 
   ipcMain.handle('browserAgent:execute', async (_event, payload) => {
-    const auth = checkAuthorization('execute');
+    const auth = checkAuthorization(DEFAULT_APP_ID, 'browser_automation', 'execute');
     if (!auth.ok) return { success: false, output: '', error: auth.error };
     const safe = payload && typeof payload === 'object' ? payload : {};
     if (typeof safe.prompt !== 'string' || safe.prompt.trim() === '') {
@@ -388,7 +593,7 @@ app.whenReady().then(() => {
   });
 
   ipcMain.handle('browserAgent:clearHistory', async () => {
-    const auth = checkAuthorization('clearHistory');
+    const auth = checkAuthorization(DEFAULT_APP_ID, 'browser_automation', 'clearHistory');
     if (!auth.ok) return { success: false, error: auth.error };
     try {
       return await workerRequest('POST', '/api/clear-history', {});
@@ -398,10 +603,52 @@ app.whenReady().then(() => {
   });
 
   ipcMain.handle('browserAgent:shutdown', async () => {
-    const auth = checkAuthorization('shutdown');
+    const auth = checkAuthorization(DEFAULT_APP_ID, 'browser_automation', 'shutdown');
     if (!auth.ok) return { success: false, error: auth.error };
     try {
       return await workerRequest('POST', '/api/shutdown', {});
+    } catch (e) {
+      return { success: false, error: String(e && e.message ? e.message : e) };
+    }
+  });
+
+  ipcMain.handle('desktopApps:listApps', async () => {
+    try {
+      return await workerRequest('GET', '/api/apps');
+    } catch (e) {
+      return { apps: [], error: String(e && e.message ? e.message : e) };
+    }
+  });
+
+  ipcMain.handle('desktopApps:call', async (_event, payload) => {
+    const safe = payload && typeof payload === 'object' ? payload : {};
+    const appId = typeof safe.app_id === 'string' ? safe.app_id.trim() : '';
+    const capability = typeof safe.capability === 'string' ? safe.capability.trim() : '';
+    const action = normalizeDesktopAction(safe.action);
+    const data = safe.data;
+    if (!appId || !capability || !action) {
+      return { success: false, error: "Missing 'app_id'/'capability' or invalid 'action'" };
+    }
+
+    if (action !== 'status' && action !== 'config') {
+      const auth = checkAuthorization(appId, capability, action);
+      if (!auth.ok) return { success: false, error: auth.error };
+    } else {
+      const auth = checkAuthorization(appId, capability, action);
+      if (!auth.ok) {
+        return action === 'status'
+          ? { initialized: false, connected: false, error: auth.error }
+          : { error: auth.error };
+      }
+    }
+
+    const req = mapDesktopActionToRequest(appId, action, data);
+    if (!req) {
+      return { success: false, error: 'Unsupported action' };
+    }
+
+    try {
+      return await workerRequest(req.method, req.path, req.body);
     } catch (e) {
       return { success: false, error: String(e && e.message ? e.message : e) };
     }
@@ -420,4 +667,9 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     app.quit();
   }
+});
+
+app.on('before-quit', () => {
+  safeKillProcess(pythonWorkerProcess);
+  safeKillProcess(xhsMcpProcess);
 });

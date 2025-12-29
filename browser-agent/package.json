@@ -13,7 +13,35 @@
     "files": [
       "dist/**/*",
       "electron/**/*",
+      "python/**/*",
       "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "python",
+        "to": "python"
+      },
+      {
+        "from": "resources/python-site-packages",
+        "to": "python-site-packages",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "resources/xiaohongshu-mcp",
+        "to": "xiaohongshu-mcp",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "resources/python-runtime",
+        "to": "python-runtime",
+        "filter": [
+          "**/*"
+        ]
+      }
     ],
     "mac": {
       "icon": "src-tauri/icons/icon.icns"
@@ -33,9 +61,12 @@
     "dev:electron": "concurrently -k \"vite\" \"wait-on http://localhost:1420 && electron ./electron/main.cjs\"",
     "dev:electron:remote": "electron ./electron/main.cjs",
     "build": "tsc && vite build",
+    "prepare:resources": "node ./scripts/prepare-resources.mjs",
     "preview": "vite preview",
-    "pack": "pnpm build && electron-builder --dir",
-    "dist": "pnpm build && electron-builder"
+    "pack": "pnpm build && pnpm prepare:resources && electron-builder --dir",
+    "dist": "pnpm build && pnpm prepare:resources && electron-builder",
+    "pack:app": "pnpm run pack",
+    "dist:app": "pnpm run dist"
   },
   "dependencies": {
     "react": "^19.1.0",
