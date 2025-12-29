@@ -11,8 +11,10 @@ Simple, clean implementation following LangChain best practices:
 import asyncio
 import logging
 import os
+import re
 import time
 import uuid
+from hashlib import sha256
 from typing import Any, AsyncGenerator, Optional
 
 from .mcp_client import MCPClientManager
@@ -51,6 +53,108 @@ class BrowserAgent:
         self.mcp_manager = MCPClientManager()
         self._thread_id = str(uuid.uuid4())
         self._browser_url: Optional[str] = None
+        self._last_snapshot_text: Optional[str] = None
+        self._last_snapshot_hash: Optional[str] = None
+
+    def _postprocess_snapshot_text(
+        self,
+        text: str,
+        *,
+        compact: bool,
+        keywords: list[str],
+        context_lines: int,
+        max_chars: int,
+        delta: bool,
+    ) -> str:
+        raw = text or ""
+        raw_hash = sha256(raw.encode("utf-8", errors="ignore")).hexdigest()
+
+        lines = raw.splitlines()
+
+        def _is_interactive_line(line: str) -> bool:
+            l = line.lower()
+            return any(
+                k in l
+                for k in (
+                    "button",
+                    "link",
+                    "textbox",
+                    "input",
+                    "checkbox",
+                    "radio",
+                    "combobox",
+                    "select",
+                    "menu",
+                    "tab",
+                    "dialog",
+                    "option",
+                )
+            )
+
+        kept_indices: set[int] = set()
+        if compact:
+            for i, line in enumerate(lines):
+                if _is_interactive_line(line):
+                    start = max(0, i - context_lines)
+                    end = min(len(lines), i + context_lines + 1)
+                    kept_indices.update(range(start, end))
+
+        if keywords:
+            try:
+                pattern = re.compile("|".join(re.escape(k) for k in keywords), re.IGNORECASE)
+            except re.error:
+                pattern = None
+            if pattern:
+                for i, line in enumerate(lines):
+                    if pattern.search(line):
+                        start = max(0, i - context_lines)
+                        end = min(len(lines), i + context_lines + 1)
+                        kept_indices.update(range(start, end))
+
+        if kept_indices:
+            filtered_lines = [lines[i] for i in sorted(kept_indices)]
+        else:
+            filtered_lines = lines
+
+        filtered = "\n".join(filtered_lines)
+        truncated = False
+        if max_chars > 0 and len(filtered) > max_chars:
+            filtered = filtered[:max_chars]
+            truncated = True
+
+        if delta:
+            prev_hash = self._last_snapshot_hash
+            prev_text = self._last_snapshot_text or ""
+            if prev_hash == raw_hash:
+                out = "[snapshot:delta] no change"
+            else:
+                prev_set = set(prev_text.splitlines())
+                now_set = set(filtered.splitlines())
+                added = [l for l in filtered.splitlines() if l not in prev_set]
+                removed = [l for l in prev_text.splitlines() if l not in now_set]
+
+                out_parts = ["[snapshot:delta] changed"]
+                if added:
+                    out_parts.append("[added]")
+                    out_parts.extend(added[:200])
+                if removed:
+                    out_parts.append("[removed]")
+                    out_parts.extend(removed[:200])
+                out = "\n".join(out_parts)
+
+            self._last_snapshot_text = raw
+            self._last_snapshot_hash = raw_hash
+
+            if truncated:
+                out += "\n[snapshot:truncated] true"
+            return out
+
+        self._last_snapshot_text = raw
+        self._last_snapshot_hash = raw_hash
+
+        if truncated:
+            filtered += "\n[snapshot:truncated] true"
+        return filtered
 
     async def setup(self, browser_url: Optional[str] = None) -> None:
         """Initialize MCP connection (stateful session)."""
@@ -82,6 +186,33 @@ class BrowserAgent:
             raise ValueError("Missing tool_name")
         safe_args = args if isinstance(args, dict) else {}
 
+        wrapper_compact = bool(safe_args.pop("_compact", True))
+        wrapper_delta = bool(safe_args.pop("_delta", False))
+        wrapper_max_chars_raw = safe_args.pop("_max_chars", 12000)
+        wrapper_context_lines_raw = safe_args.pop("_context_lines", 2)
+        wrapper_keywords_raw = safe_args.pop("_keywords", [])
+
+        try:
+            wrapper_max_chars = int(wrapper_max_chars_raw)
+        except Exception:
+            wrapper_max_chars = 12000
+        try:
+            wrapper_context_lines = int(wrapper_context_lines_raw)
+        except Exception:
+            wrapper_context_lines = 2
+        if wrapper_context_lines < 0:
+            wrapper_context_lines = 0
+        if wrapper_context_lines > 10:
+            wrapper_context_lines = 10
+
+        keywords: list[str] = []
+        if isinstance(wrapper_keywords_raw, list):
+            for k in wrapper_keywords_raw:
+                if isinstance(k, str) and k.strip():
+                    keywords.append(k.strip())
+        elif isinstance(wrapper_keywords_raw, str) and wrapper_keywords_raw.strip():
+            keywords = [wrapper_keywords_raw.strip()]
+
         tool = None
         for t in self.mcp_manager.tools:
             if getattr(t, "name", None) == tool_name:
@@ -90,7 +221,19 @@ class BrowserAgent:
         if tool is None:
             raise ValueError(f"Unknown tool: {tool_name}")
 
-        return await tool.ainvoke(safe_args)
+        result = await tool.ainvoke(safe_args)
+
+        if tool_name == "take_snapshot" and isinstance(result, str):
+            return self._postprocess_snapshot_text(
+                result,
+                compact=wrapper_compact,
+                keywords=keywords,
+                context_lines=wrapper_context_lines,
+                max_chars=wrapper_max_chars,
+                delta=wrapper_delta,
+            )
+
+        return result
 
     def is_compatible_config(
         self,
