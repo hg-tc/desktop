@@ -44,10 +44,16 @@
       }
     ],
     "mac": {
-      "icon": "src-tauri/icons/icon.icns"
+      "icon": "src-tauri/icons/icon.icns",
+      "target": [
+        "zip"
+      ]
     },
     "win": {
-      "icon": "src-tauri/icons/icon.ico"
+      "icon": "src-tauri/icons/icon.ico",
+      "target": [
+        "portable"
+      ]
     },
     "linux": {
       "icon": "src-tauri/icons/icon.png",

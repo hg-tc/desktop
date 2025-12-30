@@ -97,6 +97,33 @@ pnpm pack
 pnpm dist
 ```
 
+### 内部测试打包（免安装分发）
+
+当前 `electron-builder` 配置已针对内部测试做了默认产物选择：
+
+- **macOS**：输出 `zip`（包含 `.app`，解压即可运行）
+- **Windows**：输出 `portable`（单文件 `.exe`，免安装）
+
+在对应平台执行：
+
+```bash
+pnpm dist:app
+```
+
+产物输出目录：
+
+- `./release/`
+
+分发说明：
+
+- **macOS**：把 `release/` 下生成的 `*.zip` 发给同事，解压后双击 `.app` 运行（未签名内测包可能需要右键“打开”一次）。
+- **Windows**：把 `release/` 下生成的 `*.exe` 发给同事，双击运行即可。
+
+注意事项：
+
+- **需要安装 Chrome**（通过 remote debugging + MCP 控制浏览器）。
+- **桌面端不需要配置 LLM Key**：桌面 Worker 只负责执行原子 MCP tools，规划/推理由服务端（Consult）统一完成。
+
 如果你修改了 `python/` 或 `resources/*`（比如 routes、内置 python-site-packages、xiaohongshu-mcp 二进制等），并且你在用 **已安装的打包 App** 测试，那么需要重新 `pnpm dist` 才会生效。
 
 ## Documentation
