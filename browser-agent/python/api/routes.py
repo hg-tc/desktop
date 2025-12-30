@@ -473,7 +473,11 @@ async def get_tools() -> dict:
     """Get list of available tools."""
     agent = await get_agent()
     tools = await agent.get_available_tools()
-    return {"tools": tools}
+    try:
+        tool_schemas = await agent.get_available_tool_schemas()
+    except Exception:
+        tool_schemas = []
+    return {"tools": tools, "tool_schemas": tool_schemas}
 
 
 @router.get("/apps/{app_id}/tools")

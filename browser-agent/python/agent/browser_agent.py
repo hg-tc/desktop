@@ -284,6 +284,32 @@ class BrowserAgent:
         """Get list of available tool names."""
         return await self.mcp_manager.get_tool_names()
 
+    async def get_available_tool_schemas(self) -> list[dict[str, Any]]:
+        if not self.mcp_manager.is_connected:
+            raise RuntimeError("Executor not initialized. Call setup() first.")
+
+        out: list[dict[str, Any]] = []
+        for t in self.mcp_manager.tools:
+            name = getattr(t, "name", None)
+            if not isinstance(name, str) or not name.strip():
+                continue
+            description = getattr(t, "description", "")
+            args_schema = getattr(t, "args_schema", None)
+            input_schema: Optional[dict[str, Any]] = None
+            if args_schema is not None:
+                try:
+                    input_schema = args_schema.model_json_schema()
+                except Exception:
+                    input_schema = None
+            out.append(
+                {
+                    "name": name,
+                    "description": description or "",
+                    "input_schema": input_schema,
+                }
+            )
+        return out
+
     async def call_tool(self, tool_name: str, args: Optional[dict] = None) -> Any:
         if not self.mcp_manager.is_connected:
             raise RuntimeError("Executor not initialized. Call setup() first.")
