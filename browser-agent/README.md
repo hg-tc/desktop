@@ -23,12 +23,12 @@
 # Install Node dependencies
 pnpm install
 
-# Install Python dependencies
+# (Dev only) Install Python dependencies
 cd python && pip install -r requirements.txt
 
-# Copy environment config
+# (Dev only) Copy environment config
 cp .env.example .env
-# Edit .env with your API key
+# Edit python/.env with your API key
 ```
 
 ## 启动方式
@@ -88,6 +88,63 @@ CONSULT_WEB_URL="https://ai.ibraintech.top" pnpm dev:electron:remote
 ## 打包（生产安装包）
 
 打包会将 Electron、`python/`、以及必要的 `resources/*` 一起打入安装包。
+
+### 从 git clone 到打包产物（按平台分别打包）
+
+本项目**不建议跨平台打包**：
+
+- 在 **macOS** 上打包得到 macOS 产物（`.zip` 包含 `.app`）
+- 在 **Windows** 上打包得到 Windows 产物（`portable` 单文件 `.exe`）
+
+因为打包过程会准备/内置与平台相关的资源（例如嵌入式 Python runtime、`xiaohongshu-mcp` 二进制等），跨平台打包容易导致产物在目标系统上无法运行。
+
+#### macOS 打包（生成 `.zip`）
+
+```bash
+# 1) 获取代码
+git clone <your-repo-url>
+cd browser-agent
+
+# 2) 安装依赖
+pnpm install
+
+# 3) 打包
+pnpm dist:app
+```
+
+产物输出目录：
+
+- `./release/`
+
+典型产物文件名示例：
+
+- `browser-agent-<version>-arm64-mac.zip`
+
+#### Windows 打包（生成 `portable` 单文件 `.exe`）
+
+在 Windows 机器上（PowerShell / CMD 均可）执行：
+
+```bash
+# 1) 获取代码
+git clone <your-repo-url>
+cd browser-agent
+
+# 2) 安装依赖
+pnpm install
+
+# 3) 打包
+pnpm dist:app
+```
+
+产物输出目录：
+
+- `./release/`
+
+典型产物文件名示例：
+
+- `browser-agent-<version>.exe`
+
+如果你的仓库中包含 `xiaohongshu-mcp` 源码并希望在打包时一并构建它，则 Windows 打包机需要安装 `go`（否则会跳过该二进制的构建）。
 
 ```bash
 # 生成 release 目录（不生成安装包）
