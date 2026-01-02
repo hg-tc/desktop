@@ -1,9 +1,10 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import { spawnSync } from 'child_process';
 
-const ROOT = path.resolve(new URL('.', import.meta.url).pathname, '..');
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const RESOURCES_DIR = path.join(ROOT, 'resources');
 const PY_RUNTIME_DIR = path.join(RESOURCES_DIR, 'python-runtime');
 const PY_SITE_PACKAGES_DIR = path.join(RESOURCES_DIR, 'python-site-packages');
@@ -137,9 +138,36 @@ function ensurePythonSitePackages() {
     return;
   }
 
-  if (fs.existsSync(PY_SITE_PACKAGES_DIR) && fs.readdirSync(PY_SITE_PACKAGES_DIR).length > 0) {
-    console.log(`[resources] python-site-packages exists: ${PY_SITE_PACKAGES_DIR}`);
-    return;
+  const sitePackagesExists = fs.existsSync(PY_SITE_PACKAGES_DIR) && fs.readdirSync(PY_SITE_PACKAGES_DIR).length > 0;
+  if (sitePackagesExists) {
+    let hasPywin32 = true;
+    if (process.platform === 'win32') {
+      try {
+        const entries = fs.readdirSync(PY_SITE_PACKAGES_DIR).map((x) => x.toLowerCase());
+        const win32LibDir = path.join(PY_SITE_PACKAGES_DIR, 'win32', 'lib');
+        const pywin32System32Dir = path.join(PY_SITE_PACKAGES_DIR, 'pywin32_system32');
+        hasPywin32 =
+          entries.some((x) => x.startsWith('pywintypes') || x.startsWith('pythoncom')) ||
+          (fs.existsSync(win32LibDir) &&
+            fs.readdirSync(win32LibDir).some((x) => x.toLowerCase().startsWith('pywintypes') || x.toLowerCase().startsWith('pythoncom'))) ||
+          (fs.existsSync(pywin32System32Dir) &&
+            fs.readdirSync(pywin32System32Dir).some((x) => x.toLowerCase().includes('pywintypes') || x.toLowerCase().includes('pythoncom')));
+      } catch {
+        hasPywin32 = false;
+      }
+    }
+
+    if (hasPywin32) {
+      console.log(`[resources] python-site-packages exists: ${PY_SITE_PACKAGES_DIR}`);
+      return;
+    }
+
+    console.log('[resources] python-site-packages exists but is missing pywin32; reinstalling...');
+    try {
+      fs.rmSync(PY_SITE_PACKAGES_DIR, { recursive: true, force: true });
+    } catch {
+      // ignore
+    }
   }
 
   ensureDir(PY_SITE_PACKAGES_DIR);
@@ -171,9 +199,20 @@ function ensureXhsMcpBinary() {
     return;
   }
 
-  const srcDir = path.resolve(ROOT, '..', 'xiaohongshu-mcp');
-  if (!fs.existsSync(srcDir)) {
-    console.warn(`[resources] skip building xiaohongshu-mcp (source not found): ${srcDir}`);
+  const srcDirCandidates = [
+    path.resolve(ROOT, 'xiaohongshu-mcp'),
+    path.resolve(ROOT, 'vendor', 'xiaohongshu-mcp'),
+    path.resolve(ROOT, '..', 'xiaohongshu-mcp'),
+  ];
+  const srcDir = srcDirCandidates.find((p) => {
+    try {
+      return fs.existsSync(p);
+    } catch {
+      return false;
+    }
+  });
+  if (!srcDir) {
+    console.warn(`[resources] skip building xiaohongshu-mcp (source not found). Tried: ${srcDirCandidates.join(', ')}`);
     return;
   }
 

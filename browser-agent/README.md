@@ -14,8 +14,14 @@
 ### Prerequisites
 
 - Node.js 20+
-- Python 3.11+
 - Chrome browser
+
+Windows 打包额外依赖：
+
+- Git
+- pnpm
+- （推荐）Go 1.21+（用于构建 `xiaohongshu-mcp`）
+- 系统自带 `curl.exe`、`tar.exe`（Windows 10/11 一般已内置；用于下载/解压嵌入式 Python runtime）
 
 ### Installation
 
@@ -136,6 +142,53 @@ pnpm install
 pnpm dist:app
 ```
 
+说明：
+
+- `pnpm dist:app` 会自动执行 `pnpm prepare:resources`：
+  - 下载并准备嵌入式 Python runtime 到 `resources/python-runtime`
+  - 用嵌入式 Python 将 `python/requirements.txt` 安装到 `resources/python-site-packages`（打包时会作为 `extraResources` 进入 `resources/python-site-packages`）
+  - 尝试构建 `xiaohongshu-mcp` 到 `resources/xiaohongshu-mcp`
+- `xiaohongshu-mcp` 源码位置支持多种布局（按优先级）：
+  - `./xiaohongshu-mcp`（推荐：作为本仓库的 git submodule / vendor 目录）
+  - `./vendor/xiaohongshu-mcp`
+  - `../xiaohongshu-mcp`（旧方式：与本仓库同级目录）
+  - 如果以上目录都不存在，打包会跳过构建，安装版会缺失小红书能力。
+
+推荐做法：使用 **git submodule** 把 `xiaohongshu-mcp` 固定到仓库里（可复现、无需手工额外 clone）。
+
+```bash
+# 首次 clone（自动拉取 submodule）
+git clone --recurse-submodules <your-repo-url>
+
+# 如果你已经 clone 了仓库
+git submodule update --init --recursive
+```
+
+如果你是仓库维护者，需要首次把 `xiaohongshu-mcp` 以 submodule 方式加进来（放在 `./xiaohongshu-mcp`）：
+
+```bash
+git submodule add https://github.com/xpzouying/xiaohongshu-mcp.git xiaohongshu-mcp
+git submodule update --init --recursive
+
+# 提交 .gitmodules 与 submodule 指针
+git add .gitmodules xiaohongshu-mcp
+git commit -m "chore: add xiaohongshu-mcp submodule"
+```
+
+产物输出目录：
+
+- `./release/`
+
+Windows 默认会生成两类产物（见 `package.json -> build.win.target`）：
+
+- **NSIS 安装包**：需要安装（本项目启用 `perMachine: true`，通常需要管理员权限）
+- **portable 单文件**：免安装，双击即可运行
+
+典型产物文件名（以 `release/` 下实际生成的为准）：
+
+- `browser-agent-<version>-setup.exe`（NSIS）
+- `browser-agent-<version>.exe`（portable）
+
 产物输出目录：
 
 - `./release/`
@@ -182,6 +235,20 @@ pnpm dist:app
 - **桌面端不需要配置 LLM Key**：桌面 Worker 只负责执行原子 MCP tools，规划/推理由服务端（Consult）统一完成。
 
 如果你修改了 `python/` 或 `resources/*`（比如 routes、内置 python-site-packages、xiaohongshu-mcp 二进制等），并且你在用 **已安装的打包 App** 测试，那么需要重新 `pnpm dist` 才会生效。
+
+### Windows 打包常见问题排查
+
+如果安装版出现 `fetch failed` / worker 起不来等问题：
+
+- **[检查端口]**
+  - Python worker：`http://127.0.0.1:8765/health`
+  - xhs-mcp：`http://127.0.0.1:18060/health`
+- **[查看日志]**
+  - `%APPDATA%\browser-agent\main.log`
+  - `%APPDATA%\browser-agent\python-worker.log`
+  - `%APPDATA%\browser-agent\xhs-mcp.log`
+- **[资源缓存]**
+  - `prepare:resources` 会复用 `resources/` 下已有内容；如果你怀疑资源被缓存导致未更新，可删除 `resources/python-site-packages` 后重新 `pnpm dist:app`。
 
 ## Documentation
 

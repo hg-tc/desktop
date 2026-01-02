@@ -1,7 +1,7 @@
 {
   "name": "browser-agent",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.5",
   "type": "module",
   "main": "electron/main.cjs",
   "build": {
@@ -52,8 +52,13 @@
     "win": {
       "icon": "src-tauri/icons/icon.ico",
       "target": [
+        "nsis",
         "portable"
       ]
+    },
+    "nsis": {
+      "perMachine": true,
+      "include": "build/installer.nsh"
     },
     "linux": {
       "icon": "src-tauri/icons/icon.png",

@@ -23,3 +23,6 @@ pydantic-settings>=2.0.0
 
 # Async support
 anyio>=4.0.0
+
+# Windows support
+pywin32>=306; platform_system == "Windows"

@@ -18,6 +18,45 @@ let consentStorePath = null;
 let pythonWorkerProcess = null;
 let xhsMcpProcess = null;
 
+function appendAppLog(filename, message) {
+  try {
+    const p = path.join(app.getPath('userData'), filename);
+    const line = `[${new Date().toISOString()}] ${String(message || '').trim()}\n`;
+    fs.appendFileSync(p, line, { encoding: 'utf8' });
+  } catch {
+    return;
+  }
+}
+
+function resolveWindowsBrowserBin() {
+  const candidates = [];
+  const pf = process.env.ProgramFiles;
+  const pf86 = process.env['ProgramFiles(x86)'];
+  const ld = process.env.LOCALAPPDATA;
+
+  if (pf86) {
+    candidates.push(path.join(pf86, 'Microsoft', 'Edge', 'Application', 'msedge.exe'));
+    candidates.push(path.join(pf86, 'Google', 'Chrome', 'Application', 'chrome.exe'));
+  }
+  if (pf) {
+    candidates.push(path.join(pf, 'Microsoft', 'Edge', 'Application', 'msedge.exe'));
+    candidates.push(path.join(pf, 'Google', 'Chrome', 'Application', 'chrome.exe'));
+  }
+  if (ld) {
+    candidates.push(path.join(ld, 'Microsoft', 'Edge', 'Application', 'msedge.exe'));
+    candidates.push(path.join(ld, 'Google', 'Chrome', 'Application', 'chrome.exe'));
+  }
+
+  for (const p of candidates) {
+    try {
+      if (p && fs.existsSync(p)) return p;
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
 function resolveDevServerUrl() {
   const envUrl = process.env.VITE_DEV_SERVER_URL;
   if (envUrl && envUrl.trim()) return envUrl;
@@ -111,77 +150,228 @@ async function waitForPort(host, port, timeoutMs) {
 }
 
 async function ensurePythonWorker() {
-  const u = new URL(getWorkerBaseUrl());
-  const host = u.hostname || '127.0.0.1';
-  const port = Number(u.port || 8765);
-  if (Number.isFinite(port) && (await checkTcpPort(host, port, 250))) return;
+  appendAppLog('main.log', 'ensurePythonWorker enter');
+  try {
+    const u = new URL(getWorkerBaseUrl());
+    const host = u.hostname || '127.0.0.1';
+    const port = Number(u.port || 8765);
 
-  const scriptPath = resolveWorkerScriptPath();
-  const pythonExec = resolveEmbeddedPythonExecutable() || resolveSystemPythonExecutable();
+    if (Number.isFinite(port) && (await checkTcpPort(host, port, 250))) {
+      appendAppLog('main.log', 'ensurePythonWorker early return: port already open');
+      return;
+    }
 
-  const pythonProjectDir = isDev
-    ? path.join(__dirname, '../python')
-    : path.join(process.resourcesPath, 'python');
-  const bundledSitePackagesDir = path.join(process.resourcesPath, 'python-site-packages');
-  const existingPythonPath = typeof process.env.PYTHONPATH === 'string' ? process.env.PYTHONPATH : '';
-  const pythonPathParts = [];
-  if (!isDev) {
-    pythonPathParts.push(bundledSitePackagesDir);
+    const scriptPath = resolveWorkerScriptPath();
+    const pythonExec = resolveEmbeddedPythonExecutable() || resolveSystemPythonExecutable();
+    appendAppLog('python-worker.log', `pythonExec: ${pythonExec}`);
+    appendAppLog('python-worker.log', `scriptPath: ${scriptPath}`);
+
+    const pythonProjectDir = isDev ? path.join(__dirname, '../python') : path.join(process.resourcesPath, 'python');
+    const bundledSitePackagesDir = path.join(process.resourcesPath, 'python-site-packages');
+    const existingPythonPath = typeof process.env.PYTHONPATH === 'string' ? process.env.PYTHONPATH : '';
+    const pythonPathParts = [];
+    if (!isDev) {
+      pythonPathParts.push(bundledSitePackagesDir);
+      if (process.platform === 'win32') {
+        pythonPathParts.push(path.join(bundledSitePackagesDir, 'win32'));
+        pythonPathParts.push(path.join(bundledSitePackagesDir, 'win32', 'lib'));
+        pythonPathParts.push(path.join(bundledSitePackagesDir, 'pywin32_system32'));
+      }
+    }
+    pythonPathParts.push(pythonProjectDir);
+    if (existingPythonPath) pythonPathParts.push(existingPythonPath);
+    const pythonPath = pythonPathParts.filter(Boolean).join(path.delimiter);
+
+    const childEnv = {
+      ...process.env,
+      SERVER_HOST: host,
+      SERVER_PORT: String(port),
+      UVICORN_RELOAD: '0',
+      XIAOHONGSHU_MCP_BASE_URL: 'http://127.0.0.1:18060',
+      PYTHONPATH: pythonPath,
+      PYTHONUTF8: '1',
+      PYTHONIOENCODING: 'utf-8',
+    };
+
+    if (!isDev && process.platform === 'win32') {
+      const pywin32System32 = path.join(bundledSitePackagesDir, 'pywin32_system32');
+      const existingPath = typeof process.env.PATH === 'string' ? process.env.PATH : '';
+      childEnv.PATH = [pywin32System32, existingPath].filter(Boolean).join(path.delimiter);
+
+      appendAppLog('python-worker.log', `PYTHONPATH: ${childEnv.PYTHONPATH || ''}`);
+      appendAppLog('python-worker.log', `PATH: ${childEnv.PATH || ''}`);
+
+      try {
+        const win32LibDir = path.join(bundledSitePackagesDir, 'win32', 'lib');
+        const hasWin32Lib = fs.existsSync(win32LibDir);
+        const hasSystem32 = fs.existsSync(pywin32System32);
+        appendAppLog('python-worker.log', `pywin32 win32/lib exists: ${hasWin32Lib}`);
+        appendAppLog('python-worker.log', `pywin32_system32 exists: ${hasSystem32}`);
+        if (hasWin32Lib) {
+          const entries = fs.readdirSync(win32LibDir).slice(0, 50).join(',');
+          appendAppLog('python-worker.log', `win32/lib entries: ${entries}`);
+        }
+        if (hasSystem32) {
+          const entries = fs.readdirSync(pywin32System32).slice(0, 50).join(',');
+          appendAppLog('python-worker.log', `pywin32_system32 entries: ${entries}`);
+        }
+      } catch (err) {
+        appendAppLog('python-worker.log', `pywin32 probe failed: ${err && err.stack ? err.stack : String(err)}`);
+      }
+    }
+
+    try {
+      pythonWorkerProcess = spawn(pythonExec, [scriptPath], {
+        env: childEnv,
+        stdio: isDev ? 'inherit' : ['ignore', 'pipe', 'pipe'],
+        windowsHide: true,
+      });
+    } catch (err) {
+      appendAppLog('python-worker.log', `spawn threw: ${err && err.stack ? err.stack : String(err)}`);
+      return;
+    }
+
+    appendAppLog('python-worker.log', `spawn: ${pythonExec} ${scriptPath}`);
+    if (!isDev) {
+      if (pythonWorkerProcess.stdout) {
+        pythonWorkerProcess.stdout.on('data', (buf) => appendAppLog('python-worker.log', `[stdout] ${buf}`));
+      }
+      if (pythonWorkerProcess.stderr) {
+        pythonWorkerProcess.stderr.on('data', (buf) => appendAppLog('python-worker.log', `[stderr] ${buf}`));
+      }
+    }
+    pythonWorkerProcess.once('error', (err) => {
+      appendAppLog('python-worker.log', `spawn failed: ${err && err.stack ? err.stack : String(err)}`);
+    });
+    pythonWorkerProcess.once('exit', (code, signal) => {
+      appendAppLog('python-worker.log', `exit: code=${code} signal=${signal}`);
+    });
+
+    const ready = await waitForPort(host, port, 15000);
+    appendAppLog('main.log', `ensurePythonWorker waitForPort result: ${ready}`);
+  } catch (err) {
+    appendAppLog('main.log', `ensurePythonWorker threw: ${err && err.stack ? err.stack : String(err)}`);
   }
-  pythonPathParts.push(pythonProjectDir);
-  if (existingPythonPath) pythonPathParts.push(existingPythonPath);
-  const pythonPath = pythonPathParts.filter(Boolean).join(path.delimiter);
-
-  const childEnv = {
-    ...process.env,
-    SERVER_HOST: host,
-    SERVER_PORT: String(port),
-    UVICORN_RELOAD: '0',
-    XIAOHONGSHU_MCP_BASE_URL: 'http://127.0.0.1:18060',
-    PYTHONPATH: pythonPath,
-    PYTHONUTF8: '1',
-    PYTHONIOENCODING: 'utf-8',
-  };
-
-  pythonWorkerProcess = spawn(pythonExec, [scriptPath], {
-    env: childEnv,
-    stdio: 'inherit',
-    windowsHide: true,
-  });
-
-  await waitForPort(host, port, 15000);
 }
 
 async function ensureXhsMcp() {
-  const host = '127.0.0.1';
-  const port = 18060;
-  if (await checkTcpPort(host, port, 250)) return;
+  try {
+    appendAppLog('main.log', `ensureXhsMcp enter host=127.0.0.1 port=18060 isDev=${isDev}`);
 
-  // Login is much more reliable in headed mode. Default to headed unless explicitly disabled.
-  // Set XHS_MCP_HEADLESS=1 to force headless mode.
-  const headless = process.env.XHS_MCP_HEADLESS === '1' || process.env.XIAOHONGSHU_MCP_HEADLESS === '1';
-  // IMPORTANT: Go's flag.BoolVar treats "--headless" as true and does not consume the next arg.
-  // Use "--headless=false" form to reliably set it.
-  const mcpArgs = ['--port', ':18060', `--headless=${headless ? 'true' : 'false'}`];
+    const host = '127.0.0.1';
+    const port = 18060;
 
-  if (isDev) {
-    const xhsDir = path.resolve(__dirname, '../../xiaohongshu-mcp');
-    xhsMcpProcess = spawn('go', ['run', '.', ...mcpArgs], {
-      cwd: xhsDir,
-      env: { ...process.env },
-      stdio: 'inherit',
-      windowsHide: true,
-    });
-  } else {
-    const exePath = resolveXhsMcpExecutablePath();
-    xhsMcpProcess = spawn(exePath, mcpArgs, {
-      env: { ...process.env },
-      stdio: 'inherit',
-      windowsHide: true,
-    });
+    if (await checkTcpPort(host, port, 250)) {
+      appendAppLog('main.log', 'ensureXhsMcp early return: port already open');
+      return;
+    }
+
+    if (process.env.XHS_MCP_DISABLE === '1' || process.env.XIAOHONGSHU_MCP_DISABLE === '1') {
+      appendAppLog('main.log', 'ensureXhsMcp early return: disabled by env');
+      return;
+    }
+
+    // Login is much more reliable in headed mode. Default to headed unless explicitly disabled.
+    // Set XHS_MCP_HEADLESS=1 to force headless mode.
+    const headless = process.env.XHS_MCP_HEADLESS === '1' || process.env.XIAOHONGSHU_MCP_HEADLESS === '1';
+    // IMPORTANT: Go's flag.BoolVar treats "--headless" as true and does not consume the next arg.
+    // Use "--headless=false" form to reliably set it.
+    const mcpArgs = ['--port', ':18060', `--headless=${headless ? 'true' : 'false'}`];
+
+    if (isDev) {
+      const xhsDir = path.resolve(__dirname, '../../xiaohongshu-mcp');
+      xhsMcpProcess = spawn('go', ['run', '.', ...mcpArgs], {
+        cwd: xhsDir,
+        env: { ...process.env },
+        stdio: 'inherit',
+        windowsHide: true,
+      });
+    } else {
+      const exePath = resolveXhsMcpExecutablePath();
+      appendAppLog('xhs-mcp.log', `exePath: ${exePath}`);
+
+      try {
+        if (!fs.existsSync(exePath)) {
+          console.warn(`[xhs-mcp] executable not found: ${exePath}`);
+          appendAppLog('xhs-mcp.log', `executable not found: ${exePath}`);
+          return;
+        }
+      } catch {
+        console.warn(`[xhs-mcp] executable not accessible: ${exePath}`);
+        appendAppLog('xhs-mcp.log', `executable not accessible: ${exePath}`);
+        return;
+      }
+
+      const childEnv = { ...process.env };
+
+      if (process.platform === 'win32' && !childEnv.ROD_BROWSER_BIN) {
+        const detected = resolveWindowsBrowserBin();
+        if (detected) {
+          childEnv.ROD_BROWSER_BIN = detected;
+        }
+      }
+
+      if (childEnv.ROD_BROWSER_BIN) {
+        appendAppLog('xhs-mcp.log', `ROD_BROWSER_BIN: ${childEnv.ROD_BROWSER_BIN}`);
+      }
+
+      if (process.platform === 'win32') {
+        const forcedTemp = process.env.BROWSER_AGENT_XHS_TEMP_DIR;
+        const programData = process.env.ProgramData || process.env.PROGRAMDATA || 'C:\\ProgramData';
+        const defaultTemp = path.join(programData, 'browser-agent', 'xhs-tmp');
+        const tempDir = forcedTemp && forcedTemp.trim() ? forcedTemp.trim() : defaultTemp;
+        try {
+          fs.mkdirSync(tempDir, { recursive: true });
+          childEnv.TEMP = tempDir;
+          childEnv.TMP = tempDir;
+        } catch {
+          try {
+            const fallback = path.join(app.getPath('userData'), 'xhs-tmp');
+            fs.mkdirSync(fallback, { recursive: true });
+            childEnv.TEMP = fallback;
+            childEnv.TMP = fallback;
+          } catch {
+            // ignore
+          }
+        }
+      }
+
+      if (childEnv.TEMP || childEnv.TMP) {
+        appendAppLog('xhs-mcp.log', `TEMP: ${childEnv.TEMP || ''} TMP: ${childEnv.TMP || ''}`);
+      }
+
+      try {
+        xhsMcpProcess = spawn(exePath, mcpArgs, {
+          env: childEnv,
+          stdio: ['ignore', 'pipe', 'pipe'],
+          windowsHide: true,
+        });
+      } catch (err) {
+        appendAppLog('xhs-mcp.log', `spawn threw: ${err && err.stack ? err.stack : String(err)}`);
+        return;
+      }
+
+      appendAppLog('xhs-mcp.log', `spawn: ${exePath} ${mcpArgs.join(' ')}`);
+      if (xhsMcpProcess.stdout) {
+        xhsMcpProcess.stdout.on('data', (buf) => appendAppLog('xhs-mcp.log', `[stdout] ${buf}`));
+      }
+      if (xhsMcpProcess.stderr) {
+        xhsMcpProcess.stderr.on('data', (buf) => appendAppLog('xhs-mcp.log', `[stderr] ${buf}`));
+      }
+      xhsMcpProcess.once('error', (err) => {
+        console.error('[xhs-mcp] spawn failed', err);
+        appendAppLog('xhs-mcp.log', `spawn failed: ${err && err.stack ? err.stack : String(err)}`);
+      });
+      xhsMcpProcess.once('exit', (code, signal) => {
+        appendAppLog('xhs-mcp.log', `exit: code=${code} signal=${signal}`);
+      });
+    }
+
+    const ready = await waitForPort(host, port, 20000);
+    appendAppLog('main.log', `ensureXhsMcp waitForPort result: ${ready}`);
+  } catch (err) {
+    appendAppLog('main.log', `ensureXhsMcp threw: ${err && err.stack ? err.stack : String(err)}`);
   }
-
-  await waitForPort(host, port, 20000);
 }
 
 function safeKillProcess(p) {
