@@ -1,22 +1,106 @@
-const { app, BrowserWindow, shell, ipcMain } = require('electron');
+const { app, BrowserWindow, shell, ipcMain, session, net: electronNet } = require('electron');
 const path = require('path');
 const fs = require('fs');
-const net = require('net');
+const nodeNet = require('net');
 const { spawn } = require('child_process');
 const { URL } = require('url');
+const dns = require('dns');
 
 const isDev = !app.isPackaged;
 
-const DEFAULT_REMOTE_APP_URL = 'https://ai.ibraintech.top';
+let mainWindow = null;
+
+try {
+  if (!app.requestSingleInstanceLock()) {
+    app.quit();
+  } else {
+    app.on('second-instance', () => {
+      try {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          if (mainWindow.isMinimized()) mainWindow.restore();
+          mainWindow.focus();
+        }
+      } catch {
+      }
+    });
+  }
+} catch {
+}
+
+const DEFAULT_REMOTE_APP_URL = 'https://119.45.92.209';
+const DEFAULT_REMOTE_HOST_IP_MAP = {
+  'ai.ibraintech.top': '119.45.92.209',
+};
 
 const DEFAULT_APP_ID = 'desktop-browser-agent';
 
-let activeAuthorization = null;
+let activeAuthorizations = new Map();
 let consentStore = null;
 let consentStorePath = null;
 
 let pythonWorkerProcess = null;
 let xhsMcpProcess = null;
+let ensureXhsMcpPromise = null;
+
+if (!isDev) {
+  try {
+    const remote = process.env.BROWSER_AGENT_FORCE_LOCAL_UI === '1'
+      ? null
+      : process.env.BROWSER_AGENT_REMOTE_URL || process.env.CONSULT_WEB_URL || DEFAULT_REMOTE_APP_URL;
+    if (remote && String(remote).trim()) {
+      app.commandLine.appendSwitch('allow-running-insecure-content');
+
+      const hostRules = process.env.BROWSER_AGENT_HOST_RESOLVER_RULES;
+      if (hostRules && String(hostRules).trim()) {
+        app.commandLine.appendSwitch('host-resolver-rules', String(hostRules).trim());
+        appendAppLog('main.log', `chrome switch enabled: host-resolver-rules=${String(hostRules).trim()}`);
+      } else {
+        try {
+          const host = new URL(String(remote).trim()).hostname;
+          const remoteIp = process.env.BROWSER_AGENT_REMOTE_IP;
+          const ip = (remoteIp && String(remoteIp).trim()) || DEFAULT_REMOTE_HOST_IP_MAP[host];
+          if (host && ip && nodeNet.isIP(host) === 0) {
+            const rules = `MAP ${host} ${String(ip).trim()}`;
+            app.commandLine.appendSwitch('host-resolver-rules', rules);
+            appendAppLog('main.log', `chrome switch enabled: host-resolver-rules=${rules}`);
+          }
+        } catch {
+        }
+      }
+
+      const proxyServer = process.env.BROWSER_AGENT_PROXY_SERVER || process.env.CONSULT_PROXY_SERVER;
+      if (proxyServer && String(proxyServer).trim()) {
+        app.commandLine.appendSwitch('proxy-server', String(proxyServer).trim());
+        appendAppLog('main.log', `chrome switch enabled: proxy-server=${String(proxyServer).trim()}`);
+
+        const bypass = process.env.BROWSER_AGENT_PROXY_BYPASS_LIST;
+        if (bypass && String(bypass).trim()) {
+          app.commandLine.appendSwitch('proxy-bypass-list', String(bypass).trim());
+          appendAppLog('main.log', `chrome switch enabled: proxy-bypass-list=${String(bypass).trim()}`);
+        }
+      }
+
+      const ignoreCertEnv = process.env.BROWSER_AGENT_IGNORE_CERT_ERRORS;
+      let ignoreCert = ignoreCertEnv === '1';
+      if (!ignoreCert && ignoreCertEnv !== '0') {
+        try {
+          const host = new URL(String(remote).trim()).hostname;
+          if (host && nodeNet.isIP(host) !== 0) {
+            ignoreCert = true;
+            appendAppLog('main.log', 'auto enabled: ignore-certificate-errors for IP remote url');
+          }
+        } catch {
+        }
+      }
+      if (ignoreCert) {
+        app.commandLine.appendSwitch('ignore-certificate-errors');
+        app.commandLine.appendSwitch('allow-insecure-localhost');
+        appendAppLog('main.log', 'chrome switch enabled: ignore-certificate-errors');
+      }
+    }
+  } catch {
+  }
+}
 
 function appendAppLog(filename, message) {
   try {
@@ -77,6 +161,126 @@ function resolveRemoteAppUrl() {
   }
 }
 
+function resolveRemoteUserAgent() {
+  const envUa = process.env.BROWSER_AGENT_REMOTE_USER_AGENT || process.env.BROWSER_AGENT_USER_AGENT;
+  if (envUa && String(envUa).trim()) return String(envUa).trim();
+  return 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
+}
+
+function resolveRemoteLoadRetries() {
+  const raw = process.env.BROWSER_AGENT_REMOTE_LOAD_RETRIES;
+  const n = Number(raw);
+  if (Number.isFinite(n) && n >= 0) return Math.min(Math.floor(n), 10);
+  return 2;
+}
+
+async function probeRemoteConnectivity(remoteUrl) {
+  try {
+    if (!remoteUrl || typeof remoteUrl !== 'string') return;
+    const u = new URL(remoteUrl);
+    const host = u.hostname;
+    appendAppLog('main.log', `remote probe start url=${remoteUrl} host=${host}`);
+
+    try {
+      if (dns && dns.promises && typeof dns.promises.lookup === 'function') {
+        const addrs = await dns.promises.lookup(host, { all: true });
+        const mapped = Array.isArray(addrs)
+          ? addrs
+              .map((a) => `${a && a.address ? a.address : 'unknown'}/${a && a.family ? a.family : 'unknown'}`)
+              .join(',')
+          : '';
+        appendAppLog('main.log', `remote probe dns host=${host} addrs=${mapped}`);
+      }
+    } catch (err) {
+      appendAppLog('main.log', `remote probe dns failed host=${host} err=${err && err.message ? err.message : String(err)}`);
+    }
+
+    try {
+      const p = await session.defaultSession.resolveProxy(remoteUrl);
+      appendAppLog('main.log', `remote probe resolveProxy url=${remoteUrl} proxy=${p}`);
+    } catch (err) {
+      appendAppLog(
+        'main.log',
+        `remote probe resolveProxy failed url=${remoteUrl} err=${err && err.message ? err.message : String(err)}`
+      );
+    }
+
+    try {
+      await new Promise((resolve) => {
+        let done = false;
+        const finish = (msg) => {
+          if (done) return;
+          done = true;
+          appendAppLog('main.log', msg);
+          resolve();
+        };
+
+        const timer = setTimeout(() => finish(`remote probe timeout url=${remoteUrl}`), 8000);
+        const req = electronNet.request({ method: 'GET', url: remoteUrl });
+
+        req.on('response', (res) => {
+          try {
+            const status = typeof res.statusCode === 'number' ? res.statusCode : -1;
+            const loc = res.headers && res.headers.location ? String(res.headers.location) : '';
+            appendAppLog('main.log', `remote probe response url=${remoteUrl} status=${status} location=${loc}`);
+          } catch {
+          }
+          res.on('data', () => null);
+          res.on('end', () => {
+            clearTimeout(timer);
+            finish(`remote probe response end url=${remoteUrl}`);
+          });
+          res.on('error', (err) => {
+            clearTimeout(timer);
+            finish(`remote probe response error url=${remoteUrl} err=${err && err.message ? err.message : String(err)}`);
+          });
+        });
+        req.on('error', (err) => {
+          clearTimeout(timer);
+          finish(`remote probe request error url=${remoteUrl} err=${err && err.message ? err.message : String(err)}`);
+        });
+
+        try {
+          req.end();
+        } catch (err) {
+          clearTimeout(timer);
+          finish(`remote probe request end failed url=${remoteUrl} err=${err && err.message ? err.message : String(err)}`);
+        }
+      });
+    } catch (err) {
+      appendAppLog('main.log', `remote probe threw url=${remoteUrl} err=${err && err.stack ? err.stack : String(err)}`);
+    }
+  } catch {
+  }
+}
+
+async function showRemoteLoadFailedPage(win, remoteUrl, errorDescription) {
+  try {
+    try {
+      if (win && !win.isDestroyed()) win.show();
+    } catch {
+    }
+    const safeUrl = String(remoteUrl || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const safeErr = String(errorDescription || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const html = `<!doctype html><html><head><meta charset="utf-8" />
+      <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline';" />
+      <title>Browser Agent</title></head>
+      <body style="font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto; padding: 24px;">
+        <h2 style="margin:0 0 8px 0;">Remote UI 加载失败</h2>
+        <div style="opacity:0.8; margin-bottom: 12px;">${safeErr || 'ERR_CONNECTION_CLOSED'}</div>
+        <div style="margin-bottom: 16px; word-break: break-all;">${safeUrl}</div>
+        <div style="opacity:0.8; margin-bottom: 16px;">你可以：</div>
+        <ol style="line-height: 1.6;">
+          <li>检查网络/代理/证书拦截（公司网络经常会断开 Electron 连接）</li>
+          <li>点击右键复制链接，用系统浏览器打开验证可访问性</li>
+          <li>设置环境变量 <code>BROWSER_AGENT_FORCE_LOCAL_UI=1</code> 强制使用本地 UI</li>
+        </ol>
+      </body></html>`;
+    await win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+  } catch {
+  }
+}
+
 function resolveWorkerScriptPath() {
   if (isDev) {
     return path.join(__dirname, '../python/main.py');
@@ -117,7 +321,7 @@ function resolveXhsMcpExecutablePath() {
 
 function checkTcpPort(host, port, timeoutMs = 250) {
   return new Promise((resolve) => {
-    const socket = new net.Socket();
+    const socket = new nodeNet.Socket();
     let done = false;
 
     const finish = (ok) => {
@@ -255,6 +459,8 @@ async function ensurePythonWorker() {
 }
 
 async function ensureXhsMcp() {
+  if (ensureXhsMcpPromise) return ensureXhsMcpPromise;
+  ensureXhsMcpPromise = (async () => {
   try {
     appendAppLog('main.log', `ensureXhsMcp enter host=127.0.0.1 port=18060 isDev=${isDev}`);
 
@@ -340,9 +546,24 @@ async function ensureXhsMcp() {
         appendAppLog('xhs-mcp.log', `TEMP: ${childEnv.TEMP || ''} TMP: ${childEnv.TMP || ''}`);
       }
 
+      if (!childEnv.COOKIES_PATH) {
+        try {
+          const cookiePath = path.join(app.getPath('userData'), 'xhs-cookies.json');
+          fs.mkdirSync(path.dirname(cookiePath), { recursive: true });
+          childEnv.COOKIES_PATH = cookiePath;
+        } catch {
+          // ignore
+        }
+      }
+
+      if (childEnv.COOKIES_PATH) {
+        appendAppLog('xhs-mcp.log', `COOKIES_PATH: ${childEnv.COOKIES_PATH}`);
+      }
+
       try {
         xhsMcpProcess = spawn(exePath, mcpArgs, {
           env: childEnv,
+          cwd: app.getPath('userData'),
           stdio: ['ignore', 'pipe', 'pipe'],
           windowsHide: true,
         });
@@ -372,6 +593,11 @@ async function ensureXhsMcp() {
   } catch (err) {
     appendAppLog('main.log', `ensureXhsMcp threw: ${err && err.stack ? err.stack : String(err)}`);
   }
+  })().finally(() => {
+    ensureXhsMcpPromise = null;
+  });
+
+  return ensureXhsMcpPromise;
 }
 
 function safeKillProcess(p) {
@@ -399,12 +625,48 @@ function getAllowedOrigins() {
   return origins;
 }
 
+function getAllowedHostSuffixes() {
+  const suffixes = new Set();
+  const remote = resolveRemoteAppUrl();
+  if (remote) {
+    try {
+      const host = new URL(remote).hostname;
+      if (host) {
+        const parts = host.split('.').filter(Boolean);
+        if (parts.length >= 2) {
+          suffixes.add(parts.slice(-2).join('.'));
+        }
+      }
+    } catch {
+    }
+  }
+
+  const raw = process.env.BROWSER_AGENT_ALLOWED_HOST_SUFFIXES;
+  if (raw && String(raw).trim()) {
+    for (const item of String(raw).split(',')) {
+      const v = item.trim();
+      if (v) suffixes.add(v);
+    }
+  }
+
+  return suffixes;
+}
+
 function isAllowedUrl(url) {
   try {
     const u = new URL(url);
     if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
     const allowedOrigins = getAllowedOrigins();
-    return allowedOrigins.has(u.origin);
+    if (allowedOrigins.has(u.origin)) return true;
+
+    const allowedSuffixes = getAllowedHostSuffixes();
+    const hostname = (u.hostname || '').toLowerCase();
+    for (const suffix of allowedSuffixes) {
+      const s = String(suffix || '').toLowerCase();
+      if (!s) continue;
+      if (hostname === s || hostname.endsWith(`.${s}`)) return true;
+    }
+    return false;
   } catch {
     return false;
   }
@@ -422,7 +684,14 @@ function getWorkerBaseUrl() {
 }
 
 function shouldEnforceAuthorization() {
-  return Boolean(resolveRemoteAppUrl());
+  const remote = resolveRemoteAppUrl();
+  if (!remote) return false;
+  try {
+    const host = new URL(remote).hostname;
+    if (host && nodeNet.isIP(host) !== 0) return false;
+  } catch {
+  }
+  return true;
 }
 
 function loadConsentStore() {
@@ -461,13 +730,20 @@ function consentKeyFromPayload(payload) {
 
 function checkAuthorization(appId, capability, action) {
   if (!shouldEnforceAuthorization()) return { ok: true };
-  if (!activeAuthorization || !activeAuthorization.payload) {
+  const authKey = `${appId}:${capability}`;
+  const entry = activeAuthorizations && activeAuthorizations.get ? activeAuthorizations.get(authKey) : null;
+  if (!entry || !entry.payload) {
     return { ok: false, error: 'Not authorized' };
   }
-  if (Date.now() >= activeAuthorization.expiresAtMs) {
+  if (Date.now() >= entry.expiresAtMs) {
+    try {
+      activeAuthorizations.delete(authKey);
+    } catch {
+      // ignore
+    }
     return { ok: false, error: 'Authorization expired' };
   }
-  const payload = activeAuthorization.payload;
+  const payload = entry.payload;
   if (payload.type !== 'desktop_grant') {
     return { ok: false, error: 'Invalid authorization type' };
   }
@@ -481,8 +757,8 @@ function checkAuthorization(appId, capability, action) {
     return { ok: false, error: `Action not authorized: ${action}` };
   }
   const store = loadConsentStore();
-  const key = consentKeyFromPayload(payload);
-  if (!store[key]) {
+  const consentKey = consentKeyFromPayload(payload);
+  if (!store[consentKey]) {
     return { ok: false, error: 'Local consent missing' };
   }
   return { ok: true };
@@ -576,17 +852,106 @@ function createMainWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      allowRunningInsecureContent: Boolean(resolveRemoteAppUrl()),
     },
   });
+
+  try {
+    win.webContents.on('did-finish-load', () => {
+      try {
+        appendAppLog('main.log', `renderer did-finish-load url=${win.webContents.getURL()}`);
+      } catch {
+      }
+    });
+    win.webContents.on('console-message', (_event, level, message, line, sourceId) => {
+      appendAppLog('main.log', `renderer console level=${level} ${sourceId || ''}:${line || ''} ${message}`);
+    });
+    win.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+      appendAppLog(
+        'main.log',
+        `renderer did-fail-load main=${Boolean(isMainFrame)} code=${errorCode} desc=${errorDescription} url=${validatedURL}`
+      );
+
+      try {
+        const remote = resolveRemoteAppUrl();
+        if (
+          remote &&
+          Boolean(isMainFrame) &&
+          typeof validatedURL === 'string' &&
+          validatedURL.startsWith(new URL(remote).origin)
+        ) {
+          if (win && !win.isDestroyed()) {
+            try {
+              win.show();
+            } catch {
+            }
+
+            if (!win.__remoteFallbackShown) {
+              const maxRetries = resolveRemoteLoadRetries();
+              const tried = typeof win.__remoteRetryCount === 'number' ? win.__remoteRetryCount : 0;
+              if (maxRetries > 0 && tried < maxRetries && !win.__remoteRetryTimer) {
+                win.__remoteRetryCount = tried + 1;
+                const delayMs = 600 * win.__remoteRetryCount;
+                appendAppLog('main.log', `remote ui main-frame failed, retry ${win.__remoteRetryCount}/${maxRetries} in ${delayMs}ms`);
+                win.__remoteRetryTimer = setTimeout(() => {
+                  try {
+                    win.__remoteRetryTimer = null;
+                    if (win && !win.isDestroyed() && !win.__remoteFallbackShown) {
+                      win.loadURL(remote).catch((e) => {
+                        appendAppLog(
+                          'main.log',
+                          `remote ui retry loadURL rejected url=${remote} err=${e && e.message ? e.message : String(e)}`
+                        );
+                      });
+                    }
+                  } catch {
+                  }
+                }, delayMs);
+                return;
+              }
+
+              win.__remoteFallbackShown = true;
+              if (!isDev) {
+                appendAppLog('main.log', 'remote ui failed, falling back to local dist ui');
+                win.loadFile(path.join(__dirname, '../dist/index.html')).catch((err) => {
+                  appendAppLog('main.log', `renderer loadFile fallback failed err=${err && err.stack ? err.stack : String(err)}`);
+                  showRemoteLoadFailedPage(win, remote, `ERR ${errorCode} ${errorDescription}`);
+                });
+              } else {
+                showRemoteLoadFailedPage(win, remote, `ERR ${errorCode} ${errorDescription}`);
+              }
+            }
+          }
+        }
+      } catch {
+      }
+    });
+    win.webContents.on('render-process-gone', (_event, details) => {
+      appendAppLog('main.log', `renderer process gone reason=${details && details.reason ? details.reason : 'unknown'} exitCode=${details && typeof details.exitCode === 'number' ? details.exitCode : 'unknown'}`);
+    });
+  } catch {
+    // ignore
+  }
 
   win.once('ready-to-show', () => {
     win.show();
   });
 
+  setTimeout(() => {
+    try {
+      if (win && !win.isDestroyed() && !win.isVisible()) {
+        appendAppLog('main.log', 'renderer forced show after timeout');
+        win.show();
+      }
+    } catch {
+    }
+  }, 1500);
+
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (isAllowedUrl(url)) {
       return { action: 'allow' };
     }
+    appendAppLog('main.log', `renderer window.open blocked url=${url}`);
     shell.openExternal(url);
     return { action: 'deny' };
   });
@@ -595,23 +960,87 @@ function createMainWindow() {
     if (isAllowedUrl(url)) return;
     const isHttp = url.startsWith('http://') || url.startsWith('https://');
     if (!isHttp) return;
+    appendAppLog('main.log', `renderer will-navigate blocked url=${url}`);
     event.preventDefault();
     shell.openExternal(url);
   });
 
   const remoteUrl = resolveRemoteAppUrl();
   if (remoteUrl) {
-    win.loadURL(remoteUrl);
+    appendAppLog('main.log', `ui mode=remote url=${remoteUrl}`);
+    const ua = resolveRemoteUserAgent();
+    appendAppLog('main.log', `ui mode=remote userAgent=${ua}`);
+    try {
+      win.webContents.setUserAgent(ua);
+    } catch {
+    }
+    probeRemoteConnectivity(remoteUrl).catch(() => null);
+    win.loadURL(remoteUrl).catch((err) => {
+      appendAppLog('main.log', `renderer loadURL failed url=${remoteUrl} err=${err && err.stack ? err.stack : String(err)}`);
+      try {
+        if (!win.__remoteFallbackShown) {
+          if (win.__remoteRetryTimer) {
+            appendAppLog('main.log', 'remote ui loadURL rejected but retry is pending, skip fallback');
+            return;
+          }
+          const maxRetries = resolveRemoteLoadRetries();
+          const tried = typeof win.__remoteRetryCount === 'number' ? win.__remoteRetryCount : 0;
+          if (maxRetries > 0 && tried < maxRetries && !win.__remoteRetryTimer) {
+            win.__remoteRetryCount = tried + 1;
+            const delayMs = 600 * win.__remoteRetryCount;
+            appendAppLog('main.log', `remote ui loadURL rejected, retry ${win.__remoteRetryCount}/${maxRetries} in ${delayMs}ms`);
+            win.__remoteRetryTimer = setTimeout(() => {
+              try {
+                win.__remoteRetryTimer = null;
+                if (win && !win.isDestroyed() && !win.__remoteFallbackShown) {
+                  win.loadURL(remoteUrl).catch((e) => {
+                    appendAppLog(
+                      'main.log',
+                      `remote ui retry loadURL rejected url=${remoteUrl} err=${e && e.message ? e.message : String(e)}`
+                    );
+                  });
+                }
+              } catch {
+              }
+            }, delayMs);
+            return;
+          }
+
+          win.__remoteFallbackShown = true;
+          if (!isDev) {
+            appendAppLog('main.log', 'remote ui loadURL rejected, falling back to local dist ui');
+            win.loadFile(path.join(__dirname, '../dist/index.html')).catch((e2) => {
+              appendAppLog('main.log', `renderer loadFile fallback failed err=${e2 && e2.stack ? e2.stack : String(e2)}`);
+              showRemoteLoadFailedPage(win, remoteUrl, err && err.message ? err.message : String(err));
+            });
+          } else {
+            showRemoteLoadFailedPage(win, remoteUrl, err && err.message ? err.message : String(err));
+          }
+        }
+      } catch {
+      }
+    });
   } else if (isDev) {
-    win.loadURL(resolveDevServerUrl());
+    const devUrl = resolveDevServerUrl();
+    appendAppLog('main.log', `ui mode=dev url=${devUrl}`);
+    win.loadURL(devUrl).catch((err) => {
+      appendAppLog('main.log', `renderer loadURL failed url=${devUrl} err=${err && err.stack ? err.stack : String(err)}`);
+    });
   } else {
+    appendAppLog('main.log', 'ui mode=local file=dist/index.html');
     win.loadFile(path.join(__dirname, '../dist/index.html'));
+  }
+
+  try {
+    mainWindow = win;
+  } catch {
   }
 
   return win;
 }
 
 app.whenReady().then(() => {
+  appendAppLog('main.log', `app ready version=${app.getVersion()} isDev=${isDev} remote=${String(resolveRemoteAppUrl() || '')}`);
   consentStorePath = path.join(app.getPath('userData'), 'desktop-consents.json');
 
   ensureXhsMcp().catch(() => null);
@@ -718,10 +1147,16 @@ app.whenReady().then(() => {
         return { success: false, error: 'Invalid grant payload' };
       }
 
-      activeAuthorization = {
-        payload: data.payload,
-        expiresAtMs: exp * 1000,
-      };
+      try {
+        const p = data.payload;
+        const k = `${p.app_id}:${p.capability}`;
+        activeAuthorizations.set(k, {
+          payload: p,
+          expiresAtMs: exp * 1000,
+        });
+      } catch {
+        // ignore
+      }
 
       const store = loadConsentStore();
       const key = consentKeyFromPayload(data.payload);
@@ -833,12 +1268,18 @@ app.whenReady().then(() => {
       return { success: false, error: "Missing 'app_id'/'capability' or invalid 'action'" };
     }
 
+    appendAppLog('desktop-apps.log', `call enter app_id=${appId} capability=${capability} action=${action}`);
+
     if (action !== 'status' && action !== 'config') {
       const auth = checkAuthorization(appId, capability, action);
-      if (!auth.ok) return { success: false, error: auth.error };
+      if (!auth.ok) {
+        appendAppLog('desktop-apps.log', `call denied app_id=${appId} capability=${capability} action=${action} error=${auth.error}`);
+        return { success: false, error: auth.error };
+      }
     } else {
       const auth = checkAuthorization(appId, capability, action);
       if (!auth.ok) {
+        appendAppLog('desktop-apps.log', `call denied app_id=${appId} capability=${capability} action=${action} error=${auth.error}`);
         return action === 'status'
           ? { initialized: false, connected: false, error: auth.error }
           : { error: auth.error };
@@ -850,10 +1291,21 @@ app.whenReady().then(() => {
       return { success: false, error: 'Unsupported action' };
     }
 
+    const decorate = (resp) => {
+      if (resp && typeof resp === 'object' && !Array.isArray(resp)) {
+        return { ...resp, app_id: appId, capability, action };
+      }
+      return { app_id: appId, capability, action, data: resp };
+    };
+
     try {
-      return await workerRequest(req.method, req.path, req.body);
+      const resp = await workerRequest(req.method, req.path, req.body);
+      appendAppLog('desktop-apps.log', `call ok app_id=${appId} capability=${capability} action=${action}`);
+      return decorate(resp);
     } catch (e) {
-      return { success: false, error: String(e && e.message ? e.message : e) };
+      const errMsg = String(e && e.message ? e.message : e);
+      appendAppLog('desktop-apps.log', `call failed app_id=${appId} capability=${capability} action=${action} error=${errMsg}`);
+      return decorate({ success: false, error: errMsg });
     }
   });
 

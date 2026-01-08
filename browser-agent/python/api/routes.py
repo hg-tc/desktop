@@ -4,6 +4,8 @@ API routes for browser agent operations.
 
 import json
 import os
+import asyncio
+import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -23,6 +25,8 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 agent_instance: Optional[BrowserAgent] = None
+
+_stream_lock: Optional[asyncio.Lock] = None
 
 DEFAULT_APP_ID = "desktop-browser-agent"
 XHS_APP_ID = "desktop-xiaohongshu"
@@ -80,6 +84,13 @@ def _xhs_base_url() -> str:
 def _xhs_is_headless() -> bool:
     # Electron starts xiaohongshu-mcp in headed mode by default unless XHS_MCP_HEADLESS=1
     return (os.getenv("XHS_MCP_HEADLESS") == "1") or (os.getenv("XIAOHONGSHU_MCP_HEADLESS") == "1")
+
+
+def _get_stream_lock() -> asyncio.Lock:
+    global _stream_lock
+    if _stream_lock is None:
+        _stream_lock = asyncio.Lock()
+    return _stream_lock
 
 
 async def _xhs_request(method: str, path: str, payload: Optional[dict] = None) -> dict:
@@ -527,26 +538,121 @@ async def websocket_task(websocket: WebSocket):
     try:
         while True:
             data = await websocket.receive_text()
-            message = json.loads(data)
-            
-            if "prompt" not in message:
-                await websocket.send_json({"error": "Missing 'prompt' field"})
-                continue
-            
-            agent = await get_agent()
-            
             try:
-                async for event in agent.execute_stream(message["prompt"]):
-                    await websocket.send_json(event)
-                
+                message = json.loads(data)
+            except Exception:
+                await websocket.send_json({"type": "error", "error": "Invalid JSON"})
                 await websocket.send_json({"type": "done"})
-            
+                continue
+
+            if not isinstance(message, dict):
+                await websocket.send_json({"type": "error", "error": "Invalid message format"})
+                await websocket.send_json({"type": "done"})
+                continue
+
+            if message.get("app_id") and str(message.get("app_id")).strip() != DEFAULT_APP_ID:
+                request_id = message.get("request_id") if isinstance(message.get("request_id"), str) else str(uuid.uuid4())
+                await websocket.send_json({
+                    "type": "error",
+                    "error": "Streaming is only supported for the default app",
+                    "app_id": DEFAULT_APP_ID,
+                    "request_id": request_id,
+                })
+                await websocket.send_json({"type": "done", "app_id": DEFAULT_APP_ID, "request_id": request_id})
+                continue
+
+            prompt = message.get("prompt")
+            if not isinstance(prompt, str) or not prompt.strip():
+                request_id = message.get("request_id") if isinstance(message.get("request_id"), str) else str(uuid.uuid4())
+                await websocket.send_json({"type": "error", "error": "Missing 'prompt' field", "app_id": DEFAULT_APP_ID, "request_id": request_id})
+                await websocket.send_json({"type": "done", "app_id": DEFAULT_APP_ID, "request_id": request_id})
+                continue
+
+            request_id = message.get("request_id") if isinstance(message.get("request_id"), str) else str(uuid.uuid4())
+
+            agent = await get_agent()
+
+            try:
+                async with _get_stream_lock():
+                    async for event in agent.execute_stream(prompt):
+                        payload = event if isinstance(event, dict) else {"type": "message", "data": event}
+                        if "request_id" not in payload:
+                            payload = {**payload, "request_id": request_id}
+                        if "app_id" not in payload:
+                            payload = {**payload, "app_id": DEFAULT_APP_ID}
+                        await websocket.send_json(payload)
+
+                await websocket.send_json({"type": "done", "app_id": DEFAULT_APP_ID, "request_id": request_id})
+
             except Exception as e:
                 await websocket.send_json({
                     "type": "error",
                     "error": str(e),
+                    "app_id": DEFAULT_APP_ID,
+                    "request_id": request_id,
                 })
+                await websocket.send_json({"type": "done", "app_id": DEFAULT_APP_ID, "request_id": request_id})
     
+    except WebSocketDisconnect:
+        pass
+
+
+@router.websocket("/apps/{app_id}/ws/task")
+async def websocket_app_task(app_id: str, websocket: WebSocket):
+    normalized = _ensure_supported_app_id(app_id)
+    await websocket.accept()
+
+    try:
+        while True:
+            data = await websocket.receive_text()
+            try:
+                message = json.loads(data)
+            except Exception:
+                request_id = str(uuid.uuid4())
+                await websocket.send_json({"type": "error", "error": "Invalid JSON", "app_id": normalized, "request_id": request_id})
+                await websocket.send_json({"type": "done", "app_id": normalized, "request_id": request_id})
+                continue
+
+            if not isinstance(message, dict):
+                request_id = str(uuid.uuid4())
+                await websocket.send_json({"type": "error", "error": "Invalid message format", "app_id": normalized, "request_id": request_id})
+                await websocket.send_json({"type": "done", "app_id": normalized, "request_id": request_id})
+                continue
+
+            request_id = message.get("request_id") if isinstance(message.get("request_id"), str) else str(uuid.uuid4())
+
+            prompt = message.get("prompt")
+            if not isinstance(prompt, str) or not prompt.strip():
+                await websocket.send_json({"type": "error", "error": "Missing 'prompt' field", "app_id": normalized, "request_id": request_id})
+                await websocket.send_json({"type": "done", "app_id": normalized, "request_id": request_id})
+                continue
+
+            if normalized != DEFAULT_APP_ID:
+                await websocket.send_json({
+                    "type": "error",
+                    "error": f"Streaming is not supported for app_id: {normalized}",
+                    "app_id": normalized,
+                    "request_id": request_id,
+                })
+                await websocket.send_json({"type": "done", "app_id": normalized, "request_id": request_id})
+                continue
+
+            agent = await get_agent()
+            try:
+                async with _get_stream_lock():
+                    async for event in agent.execute_stream(prompt):
+                        payload = event if isinstance(event, dict) else {"type": "message", "data": event}
+                        if "request_id" not in payload:
+                            payload = {**payload, "request_id": request_id}
+                        if "app_id" not in payload:
+                            payload = {**payload, "app_id": normalized}
+                        await websocket.send_json(payload)
+
+                await websocket.send_json({"type": "done", "app_id": normalized, "request_id": request_id})
+            except Exception as e:
+                await websocket.send_json({"type": "error", "error": str(e), "app_id": normalized, "request_id": request_id})
+                await websocket.send_json({"type": "done", "app_id": normalized, "request_id": request_id})
+
     except WebSocketDisconnect:
         pass
 
